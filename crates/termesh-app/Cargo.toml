@@ -2,3 +2,14 @@
 name = "termesh-app"
 version.workspace = true
 edition.workspace = true
+
+[[bin]]
+name = "termesh"
+path = "src/main.rs"
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+termesh-agent = { path = "../termesh-agent" }
+termesh-layout = { path = "../termesh-layout" }
+termesh-input = { path = "../termesh-input" }
+clap = { version = "4", features = ["derive"] }
