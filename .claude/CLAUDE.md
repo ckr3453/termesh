@@ -178,6 +178,13 @@ cargo run --bin termesh-app
 
 ---
 
+## 비즈니스 모델
+
+- **라이선스 인증**: 구독 기반 — Termesh 앱 사용 자체에 구독 인증 필요
+- **AI 에이전트**: 사용자가 직접 설치한 CLI(Claude Code 등)를 그대로 사용 — Termesh가 API Key를 관리하지 않음
+
+---
+
 ## 참고
 
 - 로드맵: `.claude/tasks/ROADMAP.md`
