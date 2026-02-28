@@ -2,6 +2,8 @@
 
 use crate::adapter::AgentAdapter;
 use crate::claude_code::ClaudeCodeAdapter;
+use crate::codex_cli::CodexCliAdapter;
+use crate::gemini_cli::GeminiCliAdapter;
 use std::collections::HashMap;
 
 /// Registry that maps agent identifiers to their adapter implementations.
@@ -24,6 +26,8 @@ impl AdapterRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
         registry.register(ClaudeCodeAdapter::new());
+        registry.register(GeminiCliAdapter::new());
+        registry.register(CodexCliAdapter::new());
         registry
     }
 
@@ -87,6 +91,8 @@ mod tests {
         let registry = AdapterRegistry::with_defaults();
         let ids = registry.list_ids();
         assert!(ids.contains(&"claude"));
+        assert!(ids.contains(&"gemini"));
+        assert!(ids.contains(&"codex"));
     }
 
     #[test]
@@ -94,6 +100,8 @@ mod tests {
         let registry = AdapterRegistry::with_defaults();
         assert_eq!(registry.detect_agent("claude"), Some("claude"));
         assert_eq!(registry.detect_agent("claude code review"), Some("claude"));
+        assert_eq!(registry.detect_agent("gemini"), Some("gemini"));
+        assert_eq!(registry.detect_agent("codex fix bug"), Some("codex"));
         assert_eq!(registry.detect_agent("bash"), None);
     }
 

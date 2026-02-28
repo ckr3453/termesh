@@ -16,6 +16,8 @@
 
 pub mod adapter;
 pub mod claude_code;
+pub mod codex_cli;
+pub mod gemini_cli;
 pub mod preset;
 pub mod registry;
 pub mod workspace;
