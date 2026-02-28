@@ -12,25 +12,25 @@
 - [x] termesh-terminal: alacritty_terminal 래핑
 - [x] termesh-renderer: wgpu GPU 렌더링 파이프라인
 - [x] termesh-platform: 크로스플랫폼 윈도우 (winit)
-- [ ] termesh-layout: pane 분할 엔진 (quad/dual)
+- [x] termesh-layout: pane 분할 엔진 (quad/dual)
 
 ### 입력 처리 & 범용 터미널 완성 (2 tasks)
-- [ ] termesh-input: 키바인딩 엔진
+- [x] termesh-input: 키바인딩 엔진
 - [ ] 기본 터미널 통합 테스트 (iterm2 대체 가능 수준)
 
 ### AI 에이전트 관제탑 (5 tasks)
-- [ ] termesh-agent: 에이전트 어댑터, Claude Code 상태 추론
-- [ ] termesh-diff: 파일 감시 (notify), diff 생성 (similar)
-- [ ] 워크스페이스 프리셋 (TOML 설정 → 한 번에 실행)
-- [ ] UI 레이아웃: Focus 모드 (좌측 세션 리스트 + 우측 풀사이즈 터미널 + 사이드 패널)
-- [ ] UI 레이아웃: Split 모드 (2~4개 세션 동시 표시)
+- [x] termesh-agent: 에이전트 어댑터, Claude Code 상태 추론
+- [x] termesh-diff: 파일 감시 (notify), diff 생성 (similar)
+- [x] 워크스페이스 프리셋 (TOML 설정 → 한 번에 실행)
+- [x] UI 레이아웃: Focus 모드 (좌측 세션 리스트 + 우측 풀사이즈 터미널 + 사이드 패널)
+- [x] UI 레이아웃: Split 모드 (2~4개 세션 동시 표시)
 
 ### 에이전트 상태 표시 & 최적화 (2 tasks)
-- [ ] 세션 리스트에 에이전트 상태 아이콘/스피너 표시
-- [ ] 성능 최적화 및 메모리 프로파일링
+- [x] 세션 리스트에 에이전트 상태 아이콘/스피너 표시
+- [x] 성능 최적화 및 메모리 프로파일링
 
 ### 앱 통합 (1 task)
-- [ ] termesh-app: 모든 크레이트 조립, 이벤트 루프, 데몬 시작
+- [x] termesh-app: 모든 크레이트 조립, CLI, 워크스페이스 로딩
 
 ---
 
