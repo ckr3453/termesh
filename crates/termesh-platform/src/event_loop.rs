@@ -12,6 +12,27 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
+/// Callback trait for delegating event handling to the application layer.
+///
+/// The platform event loop calls these methods; the application implements
+/// them to wire up PTY sessions, layout, and rendering.
+pub trait AppCallbacks {
+    /// Called when a non-modifier key is pressed without an action match.
+    /// The application should forward the bytes to the active PTY.
+    fn on_input(&mut self, text: &[u8]);
+
+    /// Called when a keybinding action is matched.
+    fn on_action(&mut self, action: Action);
+
+    /// Called on each frame tick (before rendering).
+    /// The application should process pending PTY output here.
+    /// Returns a list of (grid_snapshot, x_offset, y_offset) for rendering.
+    fn on_tick(&mut self) -> Vec<(termesh_terminal::grid::GridSnapshot, f32, f32)>;
+
+    /// Called when the window is resized.
+    fn on_resize(&mut self, rows: usize, cols: usize);
+}
+
 /// Configuration for launching the platform event loop.
 pub struct PlatformConfig {
     /// Font size in points.
@@ -20,6 +41,8 @@ pub struct PlatformConfig {
     pub scrollback: usize,
     /// Input handler for keybinding dispatch.
     pub input_handler: InputHandler,
+    /// Application callbacks (optional — if None, uses standalone terminal).
+    pub callbacks: Option<Box<dyn AppCallbacks>>,
 }
 
 impl Default for PlatformConfig {
@@ -28,6 +51,7 @@ impl Default for PlatformConfig {
             font_size: 14.0,
             scrollback: 10_000,
             input_handler: InputHandler::new(),
+            callbacks: None,
         }
     }
 }
@@ -40,16 +64,20 @@ struct App {
     terminal: Option<Terminal>,
     /// Cached winit modifiers state, updated on each ModifiersChanged event.
     current_modifiers: winit::event::Modifiers,
+    /// Application callbacks for PTY/session integration.
+    callbacks: Option<Box<dyn AppCallbacks>>,
 }
 
 impl App {
-    fn new(config: PlatformConfig) -> Self {
+    fn new(mut config: PlatformConfig) -> Self {
+        let callbacks = config.callbacks.take();
         Self {
             config,
             window: None,
             renderer: None,
             terminal: None,
             current_modifiers: winit::event::Modifiers::default(),
+            callbacks,
         }
     }
 
@@ -59,43 +87,12 @@ impl App {
         }
     }
 
-    /// Dispatch a keybinding action to modify app state.
+    /// Dispatch a keybinding action.
     fn dispatch_action(&mut self, action: Action) {
-        match action {
-            Action::ToggleMode => {
-                // Will be wired to App.toggle_mode() in 009b
-                log::info!("action: ToggleMode");
-            }
-            Action::ToggleSidePanel => {
-                log::info!("action: ToggleSidePanel");
-            }
-            Action::NavigateLeft => {
-                log::info!("action: NavigateLeft");
-            }
-            Action::NavigateDown => {
-                log::info!("action: NavigateDown");
-            }
-            Action::NavigateUp => {
-                log::info!("action: NavigateUp");
-            }
-            Action::NavigateRight => {
-                log::info!("action: NavigateRight");
-            }
-            Action::FocusNext => {
-                log::info!("action: FocusNext");
-            }
-            Action::FocusPrev => {
-                log::info!("action: FocusPrev");
-            }
-            Action::SplitHorizontal => {
-                log::info!("action: SplitHorizontal");
-            }
-            Action::SplitVertical => {
-                log::info!("action: SplitVertical");
-            }
-            Action::ClosePane => {
-                log::info!("action: ClosePane");
-            }
+        if let Some(cb) = &mut self.callbacks {
+            cb.on_action(action);
+        } else {
+            log::info!("action: {action:?}");
         }
         self.request_redraw();
     }
@@ -169,9 +166,11 @@ impl ApplicationHandler for App {
 
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(width, height);
-
                     let (rows, cols) = renderer.grid_size();
-                    if let Some(terminal) = &mut self.terminal {
+
+                    if let Some(cb) = &mut self.callbacks {
+                        cb.on_resize(rows, cols);
+                    } else if let Some(terminal) = &mut self.terminal {
                         terminal.resize(rows, cols);
                     }
                 }
@@ -179,9 +178,22 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(terminal)) = (&mut self.renderer, &self.terminal) {
-                    let grid = terminal.render_grid();
-                    match renderer.render(&grid) {
+                if let Some(renderer) = &mut self.renderer {
+                    let result = if let Some(cb) = &mut self.callbacks {
+                        // App-managed rendering: get grids from callbacks
+                        let grids = cb.on_tick();
+                        let refs: Vec<(&termesh_terminal::grid::GridSnapshot, f32, f32)> =
+                            grids.iter().map(|(g, x, y)| (g, *x, *y)).collect();
+                        renderer.render_grids(&refs)
+                    } else if let Some(terminal) = &self.terminal {
+                        // Standalone mode: render single terminal
+                        let grid = terminal.render_grid();
+                        renderer.render(&grid)
+                    } else {
+                        Ok(())
+                    };
+
+                    match result {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost) => {
                             let (w, h) = renderer.size();
@@ -216,12 +228,14 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // No action matched — forward raw text to terminal
+                // No action matched — forward raw text to PTY/terminal
                 if let Some(text) = &event.text {
-                    if let Some(terminal) = &mut self.terminal {
+                    if let Some(cb) = &mut self.callbacks {
+                        cb.on_input(text.as_bytes());
+                    } else if let Some(terminal) = &mut self.terminal {
                         terminal.feed_bytes(text.as_bytes());
-                        self.request_redraw();
                     }
+                    self.request_redraw();
                 }
             }
 
