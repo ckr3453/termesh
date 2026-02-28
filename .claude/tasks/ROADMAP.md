@@ -16,7 +16,7 @@
 
 ### 입력 처리 & 범용 터미널 완성 (2 tasks)
 - [x] termesh-input: 키바인딩 엔진
-- [ ] 기본 터미널 통합 테스트 (iterm2 대체 가능 수준)
+- [x] 이벤트 루프 통합 + PTY 연결 (009a~009e)
 
 ### AI 에이전트 관제탑 (5 tasks)
 - [x] termesh-agent: 에이전트 어댑터, Claude Code 상태 추론
