@@ -48,6 +48,10 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create a new renderer for the given window surface.
+    ///
+    /// Automatically selects the best available GPU backend (Metal on macOS,
+    /// DX12/Vulkan on Windows, Vulkan on Linux). Falls back to a software
+    /// renderer when no hardware GPU is available.
     pub async fn new(
         window: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
@@ -65,23 +69,49 @@ impl Renderer {
             }
         })?;
 
-        let adapter = instance
+        // Try hardware adapter first, then fall back to software renderer
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(termesh_core::error::RenderError::GpuInitFailed {
-                reason: "no compatible GPU adapter found".to_string(),
-            })?;
+        {
+            Some(adapter) => adapter,
+            None => {
+                log::warn!("no hardware GPU adapter found, trying software fallback");
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: Some(&surface),
+                        force_fallback_adapter: true,
+                    })
+                    .await
+                    .ok_or(termesh_core::error::RenderError::GpuInitFailed {
+                        reason: "no compatible GPU adapter found (hardware or software)"
+                            .to_string(),
+                    })?
+            }
+        };
+
+        let info = adapter.get_info();
+        log::info!(
+            "GPU adapter: {} ({:?}, {:?})",
+            info.name,
+            info.backend,
+            info.device_type
+        );
 
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("termesh"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    // Use downlevel defaults for broader compatibility across
+                    // different GPU backends (integrated GPUs, older hardware).
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
                     ..Default::default()
                 },
                 None,
@@ -552,6 +582,11 @@ impl Renderer {
     /// Get the surface dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Get the surface texture format being used.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
     }
 
     /// Calculate terminal grid dimensions from the surface size.

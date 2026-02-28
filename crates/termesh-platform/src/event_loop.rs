@@ -195,7 +195,7 @@ impl ApplicationHandler for App {
 
                     match result {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             let (w, h) = renderer.size();
                             renderer.resize(w, h);
                         }
