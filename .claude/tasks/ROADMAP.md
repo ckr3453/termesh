@@ -6,12 +6,12 @@
 
 ### 범용 터미널 기초 (8 tasks)
 - [x] Phase 초기화
-- [ ] Cargo workspace 설정
-- [ ] termesh-core: 설정 구조체, 이벤트, 에러 정의
-- [ ] termesh-pty: portable-pty PTY spawn/관리
-- [ ] termesh-terminal: alacritty_terminal 래핑
-- [ ] termesh-renderer: wgpu GPU 렌더링 파이프라인
-- [ ] termesh-platform: macOS 네이티브 윈도우 (NSApplication/NSView)
+- [x] Cargo workspace 설정
+- [x] termesh-core: 설정 구조체, 이벤트, 에러 정의
+- [x] termesh-pty: portable-pty PTY spawn/관리
+- [x] termesh-terminal: alacritty_terminal 래핑
+- [x] termesh-renderer: wgpu GPU 렌더링 파이프라인
+- [x] termesh-platform: 크로스플랫폼 윈도우 (winit)
 - [ ] termesh-layout: pane 분할 엔진 (quad/dual)
 
 ### 입력 처리 & 범용 터미널 완성 (2 tasks)
@@ -34,9 +34,19 @@
 
 ---
 
-## Phase 2: 크로스 플랫폼 + 멀티 에이전트
+## Phase 2: 크로스 플랫폼 + 멀티 에이전트 + DX 개선
 
-**목표**: Linux/Windows 지원, 다양한 AI 도구 어댑터
+**목표**: Linux/Windows 지원, 다양한 AI 도구 어댑터, 개발 프로세스 고도화
+
+### 크로스 플랫폼
+- [ ] Linux/Windows 네이티브 테스트 및 최적화
+
+### 멀티 에이전트
+- [ ] Gemini CLI, Codex 등 추가 어댑터
+
+### 개발 프로세스 (DX)
+- [ ] `.claude/rules/` 자동 로드 규칙 분리 (보안, Rust 컨벤션 등 CLAUDE.md에서 분리)
+- [ ] Hooks 파일 보호 (`.env`, 바이너리, `Cargo.lock` 직접 수정 차단)
 
 ---
 

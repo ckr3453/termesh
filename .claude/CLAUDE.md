@@ -70,6 +70,11 @@ fn load_config() -> Result<Config, ConfigError> {
 - 통합 테스트: `tests/` 디렉토리
 - 테스트명: `test_<function>_<scenario>` (e.g., `test_spawn_pty_with_invalid_cwd`)
 
+### 코드 리뷰
+- 태스크 완료 후 커밋 전, `code-reviewer` 서브에이전트로 변경된 파일 리뷰 실행
+- 리뷰 관점: 보안 취약점, 에러 처리 누락, pub API 설계, 불필요한 복잡도
+- 리뷰에서 발견된 이슈는 같은 커밋에서 수정 (별도 태스크 불필요)
+
 ### 문서
 - pub 함수/타입은 반드시 doc 주석 포함
 - 복잡한 로직은 인라인 주석으로 설명
