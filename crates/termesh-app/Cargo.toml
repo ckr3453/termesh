@@ -12,4 +12,5 @@ termesh-core = { path = "../termesh-core" }
 termesh-agent = { path = "../termesh-agent" }
 termesh-layout = { path = "../termesh-layout" }
 termesh-input = { path = "../termesh-input" }
+termesh-platform = { path = "../termesh-platform" }
 clap = { version = "4", features = ["derive"] }

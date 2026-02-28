@@ -2103,6 +2103,7 @@ dependencies = [
  "termesh-core",
  "termesh-input",
  "termesh-layout",
+ "termesh-platform",
 ]
 
 [[package]]
@@ -2149,6 +2150,7 @@ dependencies = [
  "log",
  "pollster",
  "termesh-core",
+ "termesh-input",
  "termesh-renderer",
  "termesh-terminal",
  "wgpu",

@@ -4,11 +4,10 @@ mod cli;
 use app::App;
 use clap::Parser;
 use cli::{Cli, Command};
+use termesh_platform::event_loop::{self, PlatformConfig};
 
 fn main() {
-    let cli = Cli::parse();
-
-    let app = match cli.command {
+    let app = match Cli::parse().command {
         Some(Command::Open { name }) => match App::open_workspace(&name) {
             Ok(app) => app,
             Err(e) => {
@@ -19,12 +18,14 @@ fn main() {
         None => App::new(),
     };
 
-    // Phase 1: print startup info and exit
-    // Full event loop integration will connect platform + renderer + pty
-    println!(
-        "termesh v{} - {:?} mode, {} session(s)",
-        env!("CARGO_PKG_VERSION"),
-        app.view_mode(),
-        app.focus_layout().sessions().len(),
-    );
+    let config = PlatformConfig {
+        font_size: 14.0,
+        scrollback: 10_000,
+        input_handler: app.input().clone(),
+    };
+
+    if let Err(e) = event_loop::run(config) {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    }
 }

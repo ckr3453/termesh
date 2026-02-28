@@ -1,7 +1,10 @@
 //! Main event loop integrating winit, wgpu renderer, and terminal.
 
+use crate::input_bridge;
 use crate::window::default_window_attributes;
 use std::sync::Arc;
+use termesh_input::action::Action;
+use termesh_input::handler::InputHandler;
 use termesh_renderer::renderer::Renderer;
 use termesh_terminal::terminal::Terminal;
 use winit::application::ApplicationHandler;
@@ -15,6 +18,8 @@ pub struct PlatformConfig {
     pub font_size: f32,
     /// Terminal scrollback lines.
     pub scrollback: usize,
+    /// Input handler for keybinding dispatch.
+    pub input_handler: InputHandler,
 }
 
 impl Default for PlatformConfig {
@@ -22,6 +27,7 @@ impl Default for PlatformConfig {
         Self {
             font_size: 14.0,
             scrollback: 10_000,
+            input_handler: InputHandler::new(),
         }
     }
 }
@@ -32,6 +38,8 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     terminal: Option<Terminal>,
+    /// Cached winit modifiers state, updated on each ModifiersChanged event.
+    current_modifiers: winit::event::Modifiers,
 }
 
 impl App {
@@ -41,6 +49,7 @@ impl App {
             window: None,
             renderer: None,
             terminal: None,
+            current_modifiers: winit::event::Modifiers::default(),
         }
     }
 
@@ -48,6 +57,47 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// Dispatch a keybinding action to modify app state.
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::ToggleMode => {
+                // Will be wired to App.toggle_mode() in 009b
+                log::info!("action: ToggleMode");
+            }
+            Action::ToggleSidePanel => {
+                log::info!("action: ToggleSidePanel");
+            }
+            Action::NavigateLeft => {
+                log::info!("action: NavigateLeft");
+            }
+            Action::NavigateDown => {
+                log::info!("action: NavigateDown");
+            }
+            Action::NavigateUp => {
+                log::info!("action: NavigateUp");
+            }
+            Action::NavigateRight => {
+                log::info!("action: NavigateRight");
+            }
+            Action::FocusNext => {
+                log::info!("action: FocusNext");
+            }
+            Action::FocusPrev => {
+                log::info!("action: FocusPrev");
+            }
+            Action::SplitHorizontal => {
+                log::info!("action: SplitHorizontal");
+            }
+            Action::SplitVertical => {
+                log::info!("action: SplitVertical");
+            }
+            Action::ClosePane => {
+                log::info!("action: ClosePane");
+            }
+        }
+        self.request_redraw();
     }
 }
 
@@ -109,6 +159,10 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
 
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.current_modifiers = modifiers;
+            }
+
             WindowEvent::Resized(new_size) => {
                 let width = new_size.width.max(1);
                 let height = new_size.height.max(1);
@@ -145,12 +199,28 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if let Some(text) = &event.text {
-                        if let Some(terminal) = &mut self.terminal {
-                            terminal.feed_bytes(text.as_bytes());
-                            self.request_redraw();
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+
+                // Try keybinding action first
+                let modifiers = input_bridge::convert_modifiers(&self.current_modifiers);
+                let has_modifier = modifiers.ctrl || modifiers.alt || modifiers.logo;
+
+                if has_modifier {
+                    if let Some(key) = input_bridge::convert_key(&event.logical_key) {
+                        if let Some(action) = self.config.input_handler.handle_key(modifiers, key) {
+                            self.dispatch_action(action);
+                            return;
                         }
+                    }
+                }
+
+                // No action matched — forward raw text to terminal
+                if let Some(text) = &event.text {
+                    if let Some(terminal) = &mut self.terminal {
+                        terminal.feed_bytes(text.as_bytes());
+                        self.request_redraw();
                     }
                 }
             }
