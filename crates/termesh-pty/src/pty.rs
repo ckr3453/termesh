@@ -5,12 +5,26 @@ use std::io::{Read, Write};
 use std::path::Path;
 use termesh_core::error::PtyError;
 
+/// A separated PTY writer handle.
+///
+/// Allows writing to the PTY from a different thread than the reader.
+pub struct PtyWriter {
+    writer: Box<dyn Write + Send>,
+}
+
+impl PtyWriter {
+    /// Write bytes to the PTY (user input → process stdin).
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, PtyError> {
+        self.writer.write(data).map_err(PtyError::Io)
+    }
+}
+
 /// Wraps a portable-pty master/child pair.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     reader: Box<dyn Read + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Option<Box<dyn Write + Send>>,
 }
 
 impl Pty {
@@ -77,7 +91,7 @@ impl Pty {
             master: pair.master,
             child,
             reader,
-            writer,
+            writer: Some(writer),
         })
     }
 
@@ -95,8 +109,23 @@ impl Pty {
     }
 
     /// Write bytes to the PTY (user input → process stdin).
+    ///
+    /// Returns an error if the writer has been taken via `take_writer()`.
     pub fn write_input(&mut self, data: &[u8]) -> Result<usize, PtyError> {
-        self.writer.write(data).map_err(PtyError::Io)
+        match &mut self.writer {
+            Some(w) => w.write(data).map_err(PtyError::Io),
+            None => Err(PtyError::SpawnFailed {
+                reason: "PTY writer has been taken".to_string(),
+            }),
+        }
+    }
+
+    /// Take the writer handle, separating it from the PTY.
+    ///
+    /// After this, `write_input()` will fail. Use the returned `PtyWriter`
+    /// to send input from a different thread.
+    pub fn take_writer(&mut self) -> Option<PtyWriter> {
+        self.writer.take().map(|w| PtyWriter { writer: w })
     }
 
     /// Read bytes from the PTY (process stdout → display).

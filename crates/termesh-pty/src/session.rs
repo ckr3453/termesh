@@ -96,6 +96,13 @@ impl Session {
         self.pty.write_input(data)
     }
 
+    /// Take the PTY writer handle for use in a separate thread.
+    ///
+    /// After this, `write()` will fail. Use the returned `PtyWriter` instead.
+    pub fn take_writer(&mut self) -> Option<crate::pty::PtyWriter> {
+        self.pty.take_writer()
+    }
+
     /// Read output from the PTY (blocking).
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, PtyError> {
         self.pty.read_output(buf)

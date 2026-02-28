@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use termesh_core::error::PtyError;
 use termesh_core::types::SessionId;
+use termesh_pty::pty::PtyWriter;
 use termesh_pty::session::{Session, SessionConfig, SessionOutput};
 use termesh_terminal::terminal::Terminal;
 use tokio::sync::mpsc;
@@ -12,27 +13,10 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 
 /// A PTY session paired with its terminal emulator.
 struct ManagedSession {
-    /// Writer handle — sends input to the PTY.
+    /// Writer handle for sending input to the PTY.
     writer: PtyWriter,
     /// Terminal emulator that processes PTY output.
     terminal: Terminal,
-}
-
-/// Handle for writing to a session's PTY from the main thread.
-///
-/// After `Session::start_reader()` consumes the Session, we keep
-/// a separate writer channel to forward keyboard input.
-pub struct PtyWriter {
-    tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl PtyWriter {
-    /// Send input bytes to the PTY.
-    pub fn send(&self, data: Vec<u8>) -> Result<(), PtyError> {
-        self.tx.try_send(data).map_err(|_| PtyError::SpawnFailed {
-            reason: "PTY writer channel closed".to_string(),
-        })
-    }
 }
 
 /// Output received from any session.
@@ -71,52 +55,29 @@ impl SessionManager {
         let rows = config.rows;
         let cols = config.cols;
 
-        let session = Session::spawn(config)?;
+        let mut session = Session::spawn(config)?;
         let id = session.id;
+
+        // Take the writer before start_reader consumes the session
+        let writer = session.take_writer().ok_or_else(|| PtyError::SpawnFailed {
+            reason: "failed to take PTY writer".to_string(),
+        })?;
 
         let terminal = Terminal::new(rows as usize, cols as usize, DEFAULT_SCROLLBACK);
 
-        // Create a writer channel for forwarding input to the PTY
-        let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(256);
-
         // Start the background reader thread
-        let (handle, mut output_rx) = session.start_reader();
+        let (_handle, mut output_rx) = session.start_reader();
         let event_tx = self.event_tx.clone();
-
-        // Spawn a tokio task that:
-        // 1. Forwards output from the PTY reader to the event aggregator
-        // 2. Forwards input from write_tx to the PTY
         let session_id = id;
+
+        // Forward PTY output to the aggregated event channel
         tokio::spawn(async move {
-            // We need the session handle to write input after the reader consumes it.
-            // The reader thread owns the Session; we'll use a separate approach.
-            // For now, forward PTY output to the aggregated channel.
             while let Some(output) = output_rx.recv().await {
                 let is_exit = matches!(output, SessionOutput::Exited(_));
                 let _ = event_tx.send(SessionEvent { session_id, output }).await;
                 if is_exit {
                     break;
                 }
-            }
-
-            // Reclaim session from handle (for potential cleanup)
-            let _ = handle.join();
-        });
-
-        // Spawn a separate task to handle writing input to PTY
-        // We need to keep a PTY writer reference before start_reader consumes the session.
-        // Since start_reader takes ownership, we need a different approach:
-        // The writer channel will be consumed by a task that directly interacts with PTY.
-
-        // NOTE: The current Session::start_reader() design consumes the session,
-        // making writes impossible afterwards. We'll need to handle this in the
-        // PTY IO connection task (009d). For now, the writer is a placeholder.
-        let writer = PtyWriter { tx: write_tx };
-
-        // Consume write requests (drop them for now — will be wired in 009d)
-        tokio::spawn(async move {
-            while write_rx.recv().await.is_some() {
-                // Will forward to PTY in 009d
             }
         });
 
@@ -162,11 +123,20 @@ impl SessionManager {
     }
 
     /// Send input to the active session's PTY.
-    pub fn write_active(&self, data: &[u8]) -> Result<(), PtyError> {
+    pub fn write_active(&mut self, data: &[u8]) -> Result<(), PtyError> {
         if let Some(id) = self.active {
-            if let Some(session) = self.sessions.get(&id) {
-                return session.writer.send(data.to_vec());
+            if let Some(session) = self.sessions.get_mut(&id) {
+                session.writer.write(data)?;
+                return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    /// Send input to a specific session's PTY.
+    pub fn write_to(&mut self, id: SessionId, data: &[u8]) -> Result<(), PtyError> {
+        if let Some(session) = self.sessions.get_mut(&id) {
+            session.writer.write(data)?;
         }
         Ok(())
     }
@@ -176,6 +146,8 @@ impl SessionManager {
     /// Returns the number of events processed.
     pub fn process_events(&mut self) -> usize {
         let mut count = 0;
+        let mut exited = Vec::new();
+
         while let Ok(event) = self.event_rx.try_recv() {
             match event.output {
                 SessionOutput::Data(data) => {
@@ -185,12 +157,16 @@ impl SessionManager {
                     }
                 }
                 SessionOutput::Exited(_code) => {
-                    // Session exited — remove it
-                    self.remove(event.session_id);
+                    exited.push(event.session_id);
                     count += 1;
                 }
             }
         }
+
+        for id in exited {
+            self.remove(id);
+        }
+
         count
     }
 
@@ -268,7 +244,6 @@ mod tests {
         let id1 = mgr.spawn(test_config()).unwrap();
         let id2 = mgr.spawn(test_config()).unwrap();
         assert_eq!(mgr.len(), 2);
-        // First spawned session remains active
         assert_eq!(mgr.active(), Some(id1));
 
         mgr.set_active(id2);
@@ -283,7 +258,6 @@ mod tests {
 
         mgr.remove(id1);
         assert_eq!(mgr.len(), 1);
-        // Active should switch to remaining session
         assert_eq!(mgr.active(), Some(id2));
     }
 
@@ -311,7 +285,6 @@ mod tests {
         let mut mgr = SessionManager::new();
         let id = mgr.spawn(test_config()).unwrap();
         mgr.set_active(SessionId(9999));
-        // Should remain the original active
         assert_eq!(mgr.active(), Some(id));
     }
 
@@ -323,5 +296,29 @@ mod tests {
         let ids = mgr.session_ids();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[tokio::test]
+    async fn test_write_and_receive_output() {
+        let mut mgr = SessionManager::new();
+        let id = mgr.spawn(test_config()).unwrap();
+
+        // Write a command
+        #[cfg(windows)]
+        mgr.write_active(b"echo hello\r\n").unwrap();
+        #[cfg(not(windows))]
+        mgr.write_active(b"echo hello\n").unwrap();
+
+        // Wait for output
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Process events should feed data into terminal
+        let count = mgr.process_events();
+        assert!(count > 0, "expected PTY output events");
+
+        // Terminal should have content
+        let grid = mgr.terminal(id).unwrap().render_grid();
+        let has_content = grid.cells.iter().any(|c| c.c != ' ' && c.c != '\0');
+        assert!(has_content, "terminal should have rendered content");
     }
 }
