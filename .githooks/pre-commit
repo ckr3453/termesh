@@ -18,10 +18,10 @@ if [ -n "$ENV_FILES" ]; then
   exit 1
 fi
 
-# Warn about binary files
+# Warn about binary files (skip text/script files)
 BINARY_FILES=""
 for f in $STAGED_FILES; do
-  if [ -f "$f" ] && file "$f" | grep -qE 'executable|binary|ELF|Mach-O|PE32'; then
+  if [ -f "$f" ] && file "$f" | grep -qE '(ELF|Mach-O|PE32|DLL|shared object)'; then
     BINARY_FILES="$BINARY_FILES $f"
   fi
 done
