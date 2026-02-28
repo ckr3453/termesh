@@ -1,5 +1,6 @@
 //! Core types, configuration, errors, and event bus for termesh.
 
+pub mod auth;
 pub mod config;
 pub mod error;
 pub mod event;

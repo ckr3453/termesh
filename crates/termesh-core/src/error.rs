@@ -47,6 +47,25 @@ pub enum PtyError {
     Io(#[from] std::io::Error),
 }
 
+/// Errors related to authentication.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("network error: {reason}")]
+    Network { reason: String },
+
+    #[error("authentication failed: {reason}")]
+    AuthFailed { reason: String },
+
+    #[error("token expired")]
+    TokenExpired,
+
+    #[error("invalid token: {reason}")]
+    InvalidToken { reason: String },
+
+    #[error("server error: {status} — {body}")]
+    ServerError { status: u16, body: String },
+}
+
 /// Errors related to GPU rendering.
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
