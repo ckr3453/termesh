@@ -33,7 +33,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             name: "shell".to_string(),
-            command: default_shell(),
+            command: termesh_core::platform::default_shell(),
             args: Vec::new(),
             cwd: None,
             agent: "none".to_string(),
@@ -195,17 +195,6 @@ impl SessionHandle {
         self.join.join().map_err(|_| PtyError::SpawnFailed {
             reason: "reader thread panicked".to_string(),
         })
-    }
-}
-
-fn default_shell() -> String {
-    #[cfg(windows)]
-    {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     }
 }
 
