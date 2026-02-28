@@ -38,18 +38,24 @@
 
 **목표**: Linux/Windows 지원, 다양한 AI 도구 어댑터, 개발 프로세스 고도화, 구독 인증
 
-### 크로스 플랫폼
-- [ ] Linux/Windows 네이티브 테스트 및 최적화
+### 크로스 플랫폼 (3 tasks)
+- [x] PTY Windows 호환 (ConPTY 분기, 경로 처리)
+- [x] wgpu 백엔드 분기 (Vulkan/DX12/Metal, 소프트웨어 폴백)
+- [x] CI/CD 멀티 플랫폼 빌드 파이프라인
 
-### 멀티 에이전트
-- [ ] Gemini CLI, Codex 등 추가 어댑터
+### 멀티 에이전트 (3 tasks)
+- [x] 에이전트 어댑터 trait 추상화 + AdapterRegistry
+- [x] Gemini CLI 어댑터
+- [x] Codex CLI 어댑터
 
-### 구독 인증
-- [ ] 구독 기반 라이선스 인증 시스템 구현
+### 구독 인증 (3 tasks)
+- [x] 인증 API 클라이언트 (JWT, reqwest)
+- [x] 로컬 라이선스 토큰 저장소
+- [x] 앱 시작 인증 게이트 (오프라인 72시간 grace period)
 
-### 개발 프로세스 (DX)
-- [ ] `.claude/rules/` 자동 로드 규칙 분리 (보안, Rust 컨벤션 등 CLAUDE.md에서 분리)
-- [ ] Hooks 파일 보호 (`.env`, 바이너리, `Cargo.lock` 직접 수정 차단)
+### 개발 프로세스 (DX) (2 tasks)
+- [x] `.claude/rules/` 자동 로드 규칙 분리
+- [x] Hooks 파일 보호 (`.env`, 바이너리, `Cargo.lock` 직접 수정 감지)
 
 ---
 
