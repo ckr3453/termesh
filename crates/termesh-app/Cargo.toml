@@ -13,4 +13,7 @@ termesh-agent = { path = "../termesh-agent" }
 termesh-layout = { path = "../termesh-layout" }
 termesh-input = { path = "../termesh-input" }
 termesh-platform = { path = "../termesh-platform" }
+termesh-pty = { path = "../termesh-pty" }
+termesh-terminal = { path = "../termesh-terminal" }
 clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }

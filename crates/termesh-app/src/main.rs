@@ -1,5 +1,7 @@
 mod app;
 mod cli;
+#[allow(dead_code)]
+mod session_manager;
 
 use app::App;
 use clap::Parser;
