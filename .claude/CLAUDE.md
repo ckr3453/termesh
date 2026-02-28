@@ -34,89 +34,13 @@
 
 ---
 
-## 코드 컨벤션
+## 규칙 (Rules)
 
-### 파일 & 모듈
-- 파일명: `snake_case`
-- 모듈: pub 최소화, 필요한 것만 노출
-- 한 파일 최대 300줄 원칙
+상세 규칙은 `.claude/rules/` 디렉토리에서 자동 로드됩니다:
 
-### 네이밍
-- **타입**: `PascalCase`
-- **함수/변수**: `snake_case`
-- **상수**: `SCREAMING_SNAKE_CASE`
-- **에러 타입**: `<Action>Error` (e.g., `PtySpawnError`)
-
-### 에러 처리
-```rust
-// ❌ 금지
-fn load_config() -> Result<Config> {
-    Ok(parse_toml()?) // 컨텍스트 없음
-}
-
-// ✅ 권장
-fn load_config() -> Result<Config, ConfigError> {
-    parse_toml()
-        .context("Failed to parse config.toml")?
-}
-```
-
-- **`anyhow`** 금지, **`thiserror`** 사용
-- 모든 에러는 컨텍스트 메시지 포함
-- 공개 API는 커스텀 에러 타입 정의
-
-### 테스트
-- 단위 테스트: 모듈 하단 `#[cfg(test)]`
-- 통합 테스트: `tests/` 디렉토리
-- 테스트명: `test_<function>_<scenario>` (e.g., `test_spawn_pty_with_invalid_cwd`)
-
-### 코드 리뷰
-- 태스크 완료 후 커밋 전, `code-reviewer` 서브에이전트로 변경된 파일 리뷰 실행
-- 리뷰 관점: 보안 취약점, 에러 처리 누락, pub API 설계, 불필요한 복잡도
-- 리뷰에서 발견된 이슈는 같은 커밋에서 수정 (별도 태스크 불필요)
-
-### 문서
-- pub 함수/타입은 반드시 doc 주석 포함
-- 복잡한 로직은 인라인 주석으로 설명
-- 공개 모듈: `//! Module description`
-
----
-
-## Git 메시지 컨벤션
-
-### 형식
-```
-<type>(<scope>): <subject>
-
-<body>
-
-Closes #<issue> (있으면)
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-```
-
-### Type
-- **feat**: 새 기능
-- **fix**: 버그 수정
-- **refactor**: 구조 개선 (기능 변화 없음)
-- **perf**: 성능 개선
-- **test**: 테스트 추가/수정
-- **docs**: 문서만 변경
-- **chore**: 의존성, 빌드 설정 등
-
-### Scope
-크레이트 또는 모듈 (e.g., `feat(pty): spawn PTY with working directory`)
-
-### 예시
-```
-feat(layout): implement quad pane split
-
-- Divide screen into 4 equal panes
-- Add pane selection & focus with Cmd+Arrow
-- Save/restore layout state
-
-Closes #42
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-```
+- **`.claude/rules/rust-conventions.md`** — 코드 컨벤션 (네이밍, 에러 처리, 테스트, 문서)
+- **`.claude/rules/git-conventions.md`** — Git 커밋 메시지 형식
+- **`.claude/rules/security.md`** — 보안 규칙 (입력 검증, 비밀 관리)
 
 ---
 
