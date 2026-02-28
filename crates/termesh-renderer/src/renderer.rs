@@ -385,8 +385,18 @@ impl Renderer {
         self.font.metrics
     }
 
-    /// Render a terminal grid snapshot to the screen.
+    /// Render a terminal grid snapshot to the screen (full screen).
     pub fn render(&mut self, grid: &GridSnapshot) -> Result<(), wgpu::SurfaceError> {
+        self.render_grids(&[(grid, 0.0, 0.0)])
+    }
+
+    /// Render multiple grid snapshots at different screen positions.
+    ///
+    /// Each entry is (grid, x_offset, y_offset) in pixel coordinates.
+    pub fn render_grids(
+        &mut self,
+        grids: &[(&GridSnapshot, f32, f32)],
+    ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&Default::default());
 
@@ -394,50 +404,52 @@ impl Renderer {
         let atlas_w = self.glyph_cache.atlas_width as f32;
         let atlas_h = self.glyph_cache.atlas_height as f32;
 
-        // Build instance data
-        let mut bg_instances = Vec::with_capacity(grid.cells.len());
+        let mut bg_instances = Vec::new();
         let mut glyph_instances = Vec::new();
 
-        for cell in &grid.cells {
-            let x = cell.col as f32 * metrics.cell_width;
-            let y = cell.row as f32 * metrics.cell_height;
+        for &(grid, x_offset, y_offset) in grids {
+            for cell in &grid.cells {
+                let x = x_offset + cell.col as f32 * metrics.cell_width;
+                let y = y_offset + cell.row as f32 * metrics.cell_height;
 
-            // Background instance
-            bg_instances.push(CellInstance {
-                cell_pos: [x, y],
-                cell_size: [metrics.cell_width, metrics.cell_height],
-                fg_color: cell.fg.to_f32_array(),
-                bg_color: cell.bg.to_f32_array(),
-                uv_offset: [0.0, 0.0],
-                uv_size: [0.0, 0.0],
-                glyph_offset: [0.0, 0.0],
-                glyph_size: [0.0, 0.0],
-                has_glyph: 0.0,
-                _padding: 0.0,
-            });
+                bg_instances.push(CellInstance {
+                    cell_pos: [x, y],
+                    cell_size: [metrics.cell_width, metrics.cell_height],
+                    fg_color: cell.fg.to_f32_array(),
+                    bg_color: cell.bg.to_f32_array(),
+                    uv_offset: [0.0, 0.0],
+                    uv_size: [0.0, 0.0],
+                    glyph_offset: [0.0, 0.0],
+                    glyph_size: [0.0, 0.0],
+                    has_glyph: 0.0,
+                    _padding: 0.0,
+                });
 
-            // Glyph instance (skip spaces and null chars)
-            if cell.c != ' ' && cell.c != '\0' {
-                if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
-                    if glyph.width > 0 && glyph.height > 0 {
-                        let glyph_x = glyph.bearing_x;
-                        let glyph_y = metrics.baseline - glyph.bearing_y - glyph.height as f32;
+                if cell.c != ' ' && cell.c != '\0' {
+                    if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
+                        if glyph.width > 0 && glyph.height > 0 {
+                            let glyph_x = glyph.bearing_x;
+                            let glyph_y = metrics.baseline - glyph.bearing_y - glyph.height as f32;
 
-                        glyph_instances.push(CellInstance {
-                            cell_pos: [x, y],
-                            cell_size: [metrics.cell_width, metrics.cell_height],
-                            fg_color: cell.fg.to_f32_array(),
-                            bg_color: cell.bg.to_f32_array(),
-                            uv_offset: [
-                                glyph.atlas_x as f32 / atlas_w,
-                                glyph.atlas_y as f32 / atlas_h,
-                            ],
-                            uv_size: [glyph.width as f32 / atlas_w, glyph.height as f32 / atlas_h],
-                            glyph_offset: [glyph_x, glyph_y],
-                            glyph_size: [glyph.width as f32, glyph.height as f32],
-                            has_glyph: 1.0,
-                            _padding: 0.0,
-                        });
+                            glyph_instances.push(CellInstance {
+                                cell_pos: [x, y],
+                                cell_size: [metrics.cell_width, metrics.cell_height],
+                                fg_color: cell.fg.to_f32_array(),
+                                bg_color: cell.bg.to_f32_array(),
+                                uv_offset: [
+                                    glyph.atlas_x as f32 / atlas_w,
+                                    glyph.atlas_y as f32 / atlas_h,
+                                ],
+                                uv_size: [
+                                    glyph.width as f32 / atlas_w,
+                                    glyph.height as f32 / atlas_h,
+                                ],
+                                glyph_offset: [glyph_x, glyph_y],
+                                glyph_size: [glyph.width as f32, glyph.height as f32],
+                                has_glyph: 1.0,
+                                _padding: 0.0,
+                            });
+                        }
                     }
                 }
             }
