@@ -1,0 +1,8 @@
+[package]
+name = "termesh-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+alacritty_terminal = "0.25"

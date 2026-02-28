@@ -1,0 +1,13 @@
+[package]
+name = "termesh-pty"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+portable-pty = "0.8"
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

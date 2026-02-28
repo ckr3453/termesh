@@ -1,0 +1,4 @@
+[package]
+name = "termesh-app"
+version.workspace = true
+edition.workspace = true

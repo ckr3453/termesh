@@ -1,0 +1,8 @@
+[package]
+name = "termesh-layout"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,34 @@
+# Full Stack Development Workspace
+#
+# Usage: termesh open fullstack
+#
+# Copy this file to:
+#   Windows: %APPDATA%/termesh/workspaces/fullstack.toml
+#   macOS/Linux: ~/.config/termesh/workspaces/fullstack.toml
+
+name = "fullstack"
+default_mode = "split"
+side_panel = "diff"
+
+[[panes]]
+label = "Backend"
+cwd = "~/projects/myapp/backend"
+command = "claude"
+role = "Backend API development"
+
+[[panes]]
+label = "Frontend"
+cwd = "~/projects/myapp/frontend"
+command = "claude"
+role = "Frontend UI development"
+
+[[panes]]
+label = "DevOps"
+cwd = "~/projects/myapp"
+command = "claude"
+role = "CI/CD and infrastructure"
+
+[[panes]]
+label = "Shell"
+cwd = "~/projects/myapp"
+command = "bash"

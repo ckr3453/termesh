@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/termesh-core",
+    "crates/termesh-pty",
+    "crates/termesh-terminal",
+    "crates/termesh-renderer",
+    "crates/termesh-layout",
+    "crates/termesh-input",
+    "crates/termesh-agent",
+    "crates/termesh-diff",
+    "crates/termesh-platform",
+    "crates/termesh-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ckr3453/termesh"
