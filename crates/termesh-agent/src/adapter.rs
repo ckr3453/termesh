@@ -1,9 +1,26 @@
 //! Agent adapter trait for inferring agent state from terminal output.
+//!
+//! # Adding a new agent adapter
+//!
+//! 1. Create a new module (e.g., `my_agent.rs`) in this crate.
+//! 2. Implement [`AgentAdapter`] for your struct:
+//!    - `id()` — short identifier used in config files (e.g., `"my-agent"`)
+//!    - `name()` — human-readable display name
+//!    - `analyze_line()` — detect state transitions from terminal output
+//!    - `is_agent_command()` — recognize agent invocation commands
+//! 3. Register it in [`AdapterRegistry::with_defaults()`](crate::registry::AdapterRegistry::with_defaults).
 
 use termesh_core::types::AgentState;
 
 /// Adapter that analyzes terminal output to infer an AI agent's current state.
+///
+/// Each adapter corresponds to a specific AI coding agent (Claude Code,
+/// Gemini CLI, etc.) and knows how to parse its terminal output into
+/// structured state transitions.
 pub trait AgentAdapter: Send + Sync {
+    /// Short identifier for config/CLI use (e.g., "claude", "gemini").
+    fn id(&self) -> &str;
+
     /// Human-readable name for this adapter (e.g., "Claude Code").
     fn name(&self) -> &str;
 
@@ -38,6 +55,10 @@ mod tests {
     struct DummyAdapter;
 
     impl AgentAdapter for DummyAdapter {
+        fn id(&self) -> &str {
+            "dummy"
+        }
+
         fn name(&self) -> &str {
             "Dummy"
         }

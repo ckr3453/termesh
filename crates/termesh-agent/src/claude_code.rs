@@ -70,6 +70,10 @@ impl Default for ClaudeCodeAdapter {
 }
 
 impl AgentAdapter for ClaudeCodeAdapter {
+    fn id(&self) -> &str {
+        "claude"
+    }
+
     fn name(&self) -> &str {
         "Claude Code"
     }
