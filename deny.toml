@@ -1,18 +1,3 @@
-[graph]
-# Exclude workspace crates from license checks (they are our own code)
-exclude = [
-    "termesh-core",
-    "termesh-pty",
-    "termesh-terminal",
-    "termesh-renderer",
-    "termesh-layout",
-    "termesh-input",
-    "termesh-agent",
-    "termesh-diff",
-    "termesh-platform",
-    "termesh-app",
-]
-
 [advisories]
 
 [licenses]
@@ -29,6 +14,20 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
+
+# Our workspace crates don't have LICENSE files yet; allow them
+exceptions = [
+    { allow = ["MIT"], crate = "termesh-core" },
+    { allow = ["MIT"], crate = "termesh-pty" },
+    { allow = ["MIT"], crate = "termesh-terminal" },
+    { allow = ["MIT"], crate = "termesh-renderer" },
+    { allow = ["MIT"], crate = "termesh-layout" },
+    { allow = ["MIT"], crate = "termesh-input" },
+    { allow = ["MIT"], crate = "termesh-agent" },
+    { allow = ["MIT"], crate = "termesh-diff" },
+    { allow = ["MIT"], crate = "termesh-platform" },
+    { allow = ["MIT"], crate = "termesh-app" },
+]
 
 [bans]
 multiple-versions = "warn"
