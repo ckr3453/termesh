@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use termesh_core::error::PtyError;
 use termesh_core::types::SessionId;
-use termesh_pty::pty::PtyWriter;
+use termesh_pty::pty::{PtyResizer, PtyWriter};
 use termesh_pty::session::{Session, SessionConfig, SessionOutput};
 use termesh_terminal::terminal::Terminal;
 use tokio::sync::mpsc;
@@ -15,6 +15,8 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 struct ManagedSession {
     /// Writer handle for sending input to the PTY.
     writer: PtyWriter,
+    /// Resizer handle for notifying the PTY of terminal size changes.
+    resizer: PtyResizer,
     /// Terminal emulator that processes PTY output.
     terminal: Terminal,
 }
@@ -58,10 +60,11 @@ impl SessionManager {
         let mut session = Session::spawn(config)?;
         let id = session.id;
 
-        // Take the writer before start_reader consumes the session
+        // Take the writer and resizer before start_reader consumes the session
         let writer = session.take_writer().ok_or_else(|| PtyError::SpawnFailed {
             reason: "failed to take PTY writer".to_string(),
         })?;
+        let resizer = session.resizer();
 
         let terminal = Terminal::new(rows as usize, cols as usize, DEFAULT_SCROLLBACK);
 
@@ -81,8 +84,14 @@ impl SessionManager {
             }
         });
 
-        self.sessions
-            .insert(id, ManagedSession { writer, terminal });
+        self.sessions.insert(
+            id,
+            ManagedSession {
+                writer,
+                resizer,
+                terminal,
+            },
+        );
 
         // Auto-activate the first session
         if self.active.is_none() {
@@ -170,17 +179,23 @@ impl SessionManager {
         count
     }
 
-    /// Resize a session's terminal.
+    /// Resize a session's terminal and notify the PTY.
     pub fn resize(&mut self, id: SessionId, rows: usize, cols: usize) {
         if let Some(session) = self.sessions.get_mut(&id) {
             session.terminal.resize(rows, cols);
+            if let Err(e) = session.resizer.resize(rows as u16, cols as u16) {
+                log::warn!("failed to resize PTY for session {id}: {e}");
+            }
         }
     }
 
-    /// Resize all sessions' terminals.
+    /// Resize all sessions' terminals and notify their PTYs.
     pub fn resize_all(&mut self, rows: usize, cols: usize) {
-        for session in self.sessions.values_mut() {
+        for (id, session) in &mut self.sessions {
             session.terminal.resize(rows, cols);
+            if let Err(e) = session.resizer.resize(rows as u16, cols as u16) {
+                log::warn!("failed to resize PTY for session {id}: {e}");
+            }
         }
     }
 

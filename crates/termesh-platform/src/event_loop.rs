@@ -123,12 +123,16 @@ impl ApplicationHandler for App {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
+        // Scale font size by DPI factor for crisp rendering on HiDPI displays
+        let scale_factor = window.scale_factor() as f32;
+        let physical_font_size = self.config.font_size * scale_factor;
+
         // Initialize renderer
         let renderer = pollster::block_on(Renderer::new(
             window.clone(),
             width,
             height,
-            self.config.font_size,
+            physical_font_size,
         ));
 
         match renderer {

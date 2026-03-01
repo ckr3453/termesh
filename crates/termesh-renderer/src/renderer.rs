@@ -160,7 +160,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -208,8 +208,8 @@ impl Renderer {
         // Atlas texture bind group
         let atlas_view = atlas_texture.create_view(&Default::default());
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -441,10 +441,15 @@ impl Renderer {
             for cell in &grid.cells {
                 let x = x_offset + cell.col as f32 * metrics.cell_width;
                 let y = y_offset + cell.row as f32 * metrics.cell_height;
+                let cell_w = if cell.wide {
+                    metrics.cell_width * 2.0
+                } else {
+                    metrics.cell_width
+                };
 
                 bg_instances.push(CellInstance {
                     cell_pos: [x, y],
-                    cell_size: [metrics.cell_width, metrics.cell_height],
+                    cell_size: [cell_w, metrics.cell_height],
                     fg_color: cell.fg.to_f32_array(),
                     bg_color: cell.bg.to_f32_array(),
                     uv_offset: [0.0, 0.0],

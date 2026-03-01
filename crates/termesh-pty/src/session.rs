@@ -113,6 +113,11 @@ impl Session {
         self.pty.resize(rows, cols)
     }
 
+    /// Create a resizer handle that can be used from any thread.
+    pub fn resizer(&self) -> crate::pty::PtyResizer {
+        self.pty.resizer()
+    }
+
     /// Check if the child process has exited.
     pub fn try_wait(&mut self) -> Result<Option<u32>, PtyError> {
         self.pty.try_wait()

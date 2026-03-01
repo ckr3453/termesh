@@ -3,6 +3,7 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use termesh_core::error::PtyError;
 
 /// A separated PTY writer handle.
@@ -19,9 +20,35 @@ impl PtyWriter {
     }
 }
 
+/// A handle for resizing the PTY from any thread.
+///
+/// Thread-safe via internal Mutex.
+#[derive(Clone)]
+pub struct PtyResizer {
+    master: Arc<std::sync::Mutex<Box<dyn MasterPty + Send>>>,
+}
+
+impl PtyResizer {
+    /// Resize the PTY terminal.
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), PtyError> {
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let master = self.master.lock().map_err(|_| PtyError::SpawnFailed {
+            reason: "PTY master lock poisoned".to_string(),
+        })?;
+        master
+            .resize(size)
+            .map_err(|e| PtyError::Io(std::io::Error::other(e)))
+    }
+}
+
 /// Wraps a portable-pty master/child pair.
 pub struct Pty {
-    master: Box<dyn MasterPty + Send>,
+    master: Arc<std::sync::Mutex<Box<dyn MasterPty + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     reader: Box<dyn Read + Send>,
     writer: Option<Box<dyn Write + Send>>,
@@ -88,11 +115,18 @@ impl Pty {
             })?;
 
         Ok(Self {
-            master: pair.master,
+            master: Arc::new(std::sync::Mutex::new(pair.master)),
             child,
             reader,
             writer: Some(writer),
         })
+    }
+
+    /// Create a resizer handle that can be used from any thread.
+    pub fn resizer(&self) -> PtyResizer {
+        PtyResizer {
+            master: Arc::clone(&self.master),
+        }
     }
 
     /// Resize the PTY terminal.
@@ -103,7 +137,10 @@ impl Pty {
             pixel_width: 0,
             pixel_height: 0,
         };
-        self.master
+        let master = self.master.lock().map_err(|_| PtyError::SpawnFailed {
+            reason: "PTY master lock poisoned".to_string(),
+        })?;
+        master
             .resize(size)
             .map_err(|e| PtyError::Io(std::io::Error::other(e)))
     }
