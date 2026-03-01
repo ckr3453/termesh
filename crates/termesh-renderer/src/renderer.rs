@@ -423,15 +423,17 @@ impl Renderer {
 
     /// Render a terminal grid snapshot to the screen (full screen).
     pub fn render(&mut self, grid: &GridSnapshot) -> Result<(), wgpu::SurfaceError> {
-        self.render_grids(&[(grid, 0.0, 0.0)])
+        self.render_grids(&[(grid, 0.0, 0.0)], &[])
     }
 
     /// Render multiple grid snapshots at different screen positions.
     ///
     /// Each entry is (grid, x_offset, y_offset) in pixel coordinates.
+    /// `dividers` is a list of (x, y, length, is_vertical) for pane borders.
     pub fn render_grids(
         &mut self,
         grids: &[(&GridSnapshot, f32, f32)],
+        dividers: &[(f32, f32, f32, bool)],
     ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&Default::default());
@@ -643,6 +645,44 @@ impl Renderer {
                 render_pass.set_pipeline(&self.bg_pipeline);
                 render_pass.set_vertex_buffer(0, cursor_buffer.slice(..));
                 render_pass.draw(0..4, 0..cursor_instances.len() as u32);
+            }
+
+            // Pass 4: pane dividers
+            if !dividers.is_empty() {
+                let border_color = [0.4, 0.4, 0.4, 1.0];
+                let thickness = 1.0_f32;
+                let divider_instances: Vec<CellInstance> = dividers
+                    .iter()
+                    .map(|&(x, y, length, is_vertical)| {
+                        let (w, h) = if is_vertical {
+                            (thickness, length)
+                        } else {
+                            (length, thickness)
+                        };
+                        CellInstance {
+                            cell_pos: [x, y],
+                            cell_size: [w, h],
+                            fg_color: border_color,
+                            bg_color: border_color,
+                            uv_offset: [0.0, 0.0],
+                            uv_size: [0.0, 0.0],
+                            glyph_offset: [0.0, 0.0],
+                            glyph_size: [0.0, 0.0],
+                            has_glyph: 0.0,
+                            _padding: 0.0,
+                        }
+                    })
+                    .collect();
+                let divider_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("divider_instances"),
+                            contents: bytemuck::cast_slice(&divider_instances),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                render_pass.set_pipeline(&self.bg_pipeline);
+                render_pass.set_vertex_buffer(0, divider_buffer.slice(..));
+                render_pass.draw(0..4, 0..divider_instances.len() as u32);
             }
         }
 

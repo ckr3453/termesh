@@ -131,6 +131,19 @@ impl AppCallbacks for TermeshCallbacks {
         grids
     }
 
+    fn dividers(&self) -> Vec<(f32, f32, f32, bool)> {
+        let (w, h) = self.window_size;
+        self.layout
+            .compute_dividers(w, h)
+            .iter()
+            .map(|d| {
+                let is_vertical =
+                    d.orientation == termesh_layout::split_layout::DividerOrientation::Vertical;
+                (d.x as f32, d.y as f32, d.length as f32, is_vertical)
+            })
+            .collect()
+    }
+
     fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32) {
         self.window_size = (width, height);
         // For now, resize all sessions to the same grid size.

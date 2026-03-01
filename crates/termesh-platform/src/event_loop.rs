@@ -29,6 +29,10 @@ pub trait AppCallbacks {
     /// Returns a list of (grid_snapshot, x_offset, y_offset) for rendering.
     fn on_tick(&mut self) -> Vec<(termesh_terminal::grid::GridSnapshot, f32, f32)>;
 
+    /// Returns divider lines for pane borders.
+    /// Each entry is (x, y, length, is_vertical, is_active).
+    fn dividers(&self) -> Vec<(f32, f32, f32, bool)>;
+
     /// Called when the window is resized.
     /// `rows`/`cols` are grid dimensions, `width`/`height` are pixel dimensions.
     fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32);
@@ -265,9 +269,10 @@ impl ApplicationHandler for App {
                     let result = if let Some(cb) = &mut self.callbacks {
                         // App-managed rendering: get grids from callbacks
                         let grids = cb.on_tick();
+                        let dividers = cb.dividers();
                         let refs: Vec<(&termesh_terminal::grid::GridSnapshot, f32, f32)> =
                             grids.iter().map(|(g, x, y)| (g, *x, *y)).collect();
-                        renderer.render_grids(&refs)
+                        renderer.render_grids(&refs, &dividers)
                     } else if let Some(terminal) = &self.terminal {
                         // Standalone mode: render single terminal
                         let grid = terminal.render_grid();
