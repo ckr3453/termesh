@@ -216,7 +216,7 @@ mod tests {
             AgentState::WritingCode,
             AgentState::RunningCommand,
         ] {
-            status.set_state(state.clone());
+            status.set_state(state);
             assert!(status.is_spinning(), "should spin for {state:?}");
         }
 
@@ -227,7 +227,7 @@ mod tests {
             AgentState::Success,
             AgentState::Error,
         ] {
-            status.set_state(state.clone());
+            status.set_state(state);
             assert!(!status.is_spinning(), "should not spin for {state:?}");
         }
     }

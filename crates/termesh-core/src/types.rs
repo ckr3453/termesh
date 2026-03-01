@@ -24,7 +24,7 @@ impl fmt::Display for PaneId {
 }
 
 /// Current state of an AI agent session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentState {
     /// No agent attached (plain shell).
     #[default]

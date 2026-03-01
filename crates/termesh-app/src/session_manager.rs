@@ -1,8 +1,9 @@
 //! Manages multiple PTY sessions and their associated terminals.
 
 use std::collections::HashMap;
+use termesh_agent::registry::AdapterRegistry;
 use termesh_core::error::PtyError;
-use termesh_core::types::SessionId;
+use termesh_core::types::{AgentState, SessionId};
 use termesh_pty::pty::{PtyResizer, PtyWriter};
 use termesh_pty::session::{Session, SessionConfig, SessionOutput};
 use termesh_terminal::terminal::Terminal;
@@ -19,6 +20,10 @@ struct ManagedSession {
     resizer: PtyResizer,
     /// Terminal emulator that processes PTY output.
     terminal: Terminal,
+    /// Which agent adapter (if any) handles this session.
+    adapter_id: Option<String>,
+    /// Current detected agent state.
+    agent_state: AgentState,
 }
 
 /// Output received from any session.
@@ -38,6 +43,8 @@ pub struct SessionManager {
     event_rx: mpsc::Receiver<SessionEvent>,
     /// Sender clone for spawning new session readers.
     event_tx: mpsc::Sender<SessionEvent>,
+    /// Agent adapter registry for detecting agent state from PTY output.
+    registry: AdapterRegistry,
 }
 
 impl SessionManager {
@@ -49,6 +56,7 @@ impl SessionManager {
             active: None,
             event_rx,
             event_tx,
+            registry: AdapterRegistry::with_defaults(),
         }
     }
 
@@ -56,6 +64,7 @@ impl SessionManager {
     pub fn spawn(&mut self, config: SessionConfig) -> Result<SessionId, PtyError> {
         let rows = config.rows;
         let cols = config.cols;
+        let command = config.command.clone();
 
         let mut session = Session::spawn(config)?;
         let id = session.id;
@@ -84,12 +93,22 @@ impl SessionManager {
             }
         });
 
+        // Detect if the spawn command is an agent
+        let adapter_id = self.registry.detect_agent(&command).map(|s| s.to_string());
+        let agent_state = if adapter_id.is_some() {
+            AgentState::Idle
+        } else {
+            AgentState::None
+        };
+
         self.sessions.insert(
             id,
             ManagedSession {
                 writer,
                 resizer,
                 terminal,
+                adapter_id,
+                agent_state,
             },
         );
 
@@ -156,18 +175,48 @@ impl SessionManager {
     pub fn process_events(&mut self) -> usize {
         let mut count = 0;
         let mut exited = Vec::new();
+        // Collect adapter analysis results: (session_id, adapter_id, data_text)
+        let mut analyze_queue: Vec<(SessionId, String, String)> = Vec::new();
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event.output {
                 SessionOutput::Data(data) => {
                     if let Some(session) = self.sessions.get_mut(&event.session_id) {
                         session.terminal.feed_bytes(&data);
+                        // Queue for agent analysis if this session has an adapter
+                        if let Some(adapter_id) = &session.adapter_id {
+                            let text = String::from_utf8_lossy(&data);
+                            if !text.trim().is_empty() {
+                                analyze_queue.push((
+                                    event.session_id,
+                                    adapter_id.clone(),
+                                    text.into_owned(),
+                                ));
+                            }
+                        }
                         count += 1;
                     }
                 }
                 SessionOutput::Exited(_code) => {
                     exited.push(event.session_id);
                     count += 1;
+                }
+            }
+        }
+
+        // Apply agent state analysis
+        for (session_id, adapter_id, text) in analyze_queue {
+            if let Some(adapter) = self.registry.get(&adapter_id) {
+                if let Some(new_state) = adapter.analyze_output(&text) {
+                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                        if session.agent_state != new_state {
+                            log::debug!(
+                                "session {session_id}: agent state {:?} → {new_state:?}",
+                                session.agent_state
+                            );
+                            session.agent_state = new_state;
+                        }
+                    }
                 }
             }
         }
@@ -212,6 +261,22 @@ impl SessionManager {
     /// Get all session IDs.
     pub fn session_ids(&self) -> Vec<SessionId> {
         self.sessions.keys().copied().collect()
+    }
+
+    /// Get the agent state for a session.
+    pub fn agent_state(&self, id: SessionId) -> AgentState {
+        self.sessions
+            .get(&id)
+            .map(|s| s.agent_state)
+            .unwrap_or(AgentState::None)
+    }
+
+    /// Check if a session is an agent session.
+    pub fn is_agent(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .map(|s| s.adapter_id.is_some())
+            .unwrap_or(false)
     }
 }
 
