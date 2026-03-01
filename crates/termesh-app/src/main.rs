@@ -212,9 +212,28 @@ impl TermeshCallbacks {
         }
     }
 
-    /// Get the session ID bound to the focused pane.
+    /// Get the session ID that should receive input (mode-aware).
     fn focused_session(&self) -> Option<termesh_core::types::SessionId> {
-        self.layout.layout().focused_pane().session_id
+        match self.view_mode {
+            ViewMode::Focus => self.focus_layout.sessions().selected_id(),
+            ViewMode::Split => self.layout.layout().focused_pane().session_id,
+        }
+    }
+
+    /// Resize the selected session to fill the terminal region (for Focus mode).
+    fn resize_focused_session(&mut self) {
+        if self.view_mode != ViewMode::Focus {
+            return;
+        }
+        if let Some(session_id) = self.focus_layout.sessions().selected_id() {
+            let (width, height) = self.window_size;
+            let (cell_w, cell_h) = self.cell_size;
+            let regions = self.focus_layout.compute_regions(width, height);
+            let cols = (regions.terminal.width as f32 / cell_w).floor() as usize;
+            let rows = (regions.terminal.height as f32 / cell_h).floor() as usize;
+            self.session_mgr
+                .resize(session_id, rows.max(1), cols.max(1));
+        }
     }
 
     /// Start a FileWatcher on the given path, or current directory if None.
@@ -303,12 +322,24 @@ impl AppCallbacks for TermeshCallbacks {
                 }
                 self.layout.layout_mut().close_pane(focused.id);
             }
-            Action::FocusNext => {
-                self.layout.focus_next();
-            }
-            Action::FocusPrev => {
-                self.layout.focus_prev();
-            }
+            Action::FocusNext => match self.view_mode {
+                ViewMode::Focus => {
+                    self.focus_layout.sessions_mut().select_next();
+                    self.resize_focused_session();
+                }
+                ViewMode::Split => {
+                    self.layout.focus_next();
+                }
+            },
+            Action::FocusPrev => match self.view_mode {
+                ViewMode::Focus => {
+                    self.focus_layout.sessions_mut().select_prev();
+                    self.resize_focused_session();
+                }
+                ViewMode::Split => {
+                    self.layout.focus_prev();
+                }
+            },
             Action::NavigateLeft => {
                 let (w, h) = self.window_size;
                 self.layout.focus_direction(Direction::Left, w, h);
@@ -326,7 +357,23 @@ impl AppCallbacks for TermeshCallbacks {
                 self.layout.focus_direction(Direction::Right, w, h);
             }
             Action::ToggleMode => {
-                self.layout.toggle_zoom();
+                self.view_mode = match self.view_mode {
+                    ViewMode::Focus => {
+                        // Entering Split: resize all panes for split layout
+                        let (w, h) = self.window_size;
+                        let (cw, ch) = self.cell_size;
+                        let regions = self.focus_layout.compute_regions(w, h);
+                        for pane in self.layout.layout().panes().to_vec() {
+                            if let Some(sid) = pane.session_id {
+                                let (r, c) = pane.grid_size(regions.terminal.width, h, cw, ch);
+                                self.session_mgr.resize(sid, r, c);
+                            }
+                        }
+                        ViewMode::Split
+                    }
+                    ViewMode::Split => ViewMode::Focus,
+                };
+                self.resize_focused_session();
             }
             Action::ToggleSidePanel => {
                 self.focus_layout.toggle_side_panel();
@@ -384,18 +431,35 @@ impl AppCallbacks for TermeshCallbacks {
 
         // Terminal grids in center region
         let terminal_rect = regions.terminal;
-        for pane in self.layout.layout().panes() {
-            if !self.layout.is_pane_visible(pane.id) {
-                continue;
+        match self.view_mode {
+            ViewMode::Focus => {
+                // Focus mode: render only the selected session's terminal, full-size
+                if let Some(session_id) = self.focus_layout.sessions().selected_id() {
+                    if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                        grids.push((
+                            terminal.render_grid(),
+                            terminal_rect.x as f32,
+                            terminal_rect.y as f32,
+                        ));
+                    }
+                }
             }
-            if let Some(session_id) = pane.session_id {
-                if let Some(terminal) = self.session_mgr.terminal(session_id) {
-                    let rect = pane.pixel_rect(terminal_rect.width, screen_h);
-                    grids.push((
-                        terminal.render_grid(),
-                        terminal_rect.x as f32 + rect.x as f32,
-                        rect.y as f32,
-                    ));
+            ViewMode::Split => {
+                // Split mode: render all visible split panes
+                for pane in self.layout.layout().panes() {
+                    if !self.layout.is_pane_visible(pane.id) {
+                        continue;
+                    }
+                    if let Some(session_id) = pane.session_id {
+                        if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                            let rect = pane.pixel_rect(terminal_rect.width, screen_h);
+                            grids.push((
+                                terminal.render_grid(),
+                                terminal_rect.x as f32 + rect.x as f32,
+                                rect.y as f32,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -407,13 +471,13 @@ impl AppCallbacks for TermeshCallbacks {
         let (w, h) = self.window_size;
         let regions = self.focus_layout.compute_regions(w, h);
         let terminal_x = regions.terminal.x as f32;
-        let terminal_w = regions.terminal.width;
 
-        let mut dividers: Vec<(f32, f32, f32, bool)> = self
-            .layout
-            .compute_dividers(terminal_w, h)
-            .iter()
-            .map(|d| {
+        let mut dividers: Vec<(f32, f32, f32, bool)> = Vec::new();
+
+        // Split pane dividers only in Split mode
+        if self.view_mode == ViewMode::Split {
+            let terminal_w = regions.terminal.width;
+            dividers.extend(self.layout.compute_dividers(terminal_w, h).iter().map(|d| {
                 let is_vertical =
                     d.orientation == termesh_layout::split_layout::DividerOrientation::Vertical;
                 (
@@ -422,15 +486,13 @@ impl AppCallbacks for TermeshCallbacks {
                     d.length as f32,
                     is_vertical,
                 )
-            })
-            .collect();
+            }));
+        }
 
-        // Add a vertical divider between session list and terminal area
+        // Session list / side panel dividers (both modes)
         if self.show_session_list && regions.session_list.width > 0 {
             dividers.push((terminal_x, 0.0, h as f32, true));
         }
-
-        // Add a vertical divider between terminal and side panel
         if regions.side_panel.width > 0 {
             let side_x = regions.side_panel.x as f32;
             dividers.push((side_x, 0.0, h as f32, true));
@@ -451,15 +513,27 @@ impl AppCallbacks for TermeshCallbacks {
         self.window_size = (width, height);
         self.cell_size = (cell_w, cell_h);
 
-        // Use focus layout regions to determine terminal area
         let regions = self.focus_layout.compute_regions(width, height);
-        let terminal_width = regions.terminal.width;
 
-        // Per-pane resize: each pane gets its own grid dimensions
-        for pane in self.layout.layout().panes().to_vec() {
-            if let Some(session_id) = pane.session_id {
-                let (rows, cols) = pane.grid_size(terminal_width, height, cell_w, cell_h);
-                self.session_mgr.resize(session_id, rows, cols);
+        match self.view_mode {
+            ViewMode::Focus => {
+                // Resize only the selected session to fill the terminal region
+                if let Some(session_id) = self.focus_layout.sessions().selected_id() {
+                    let cols = (regions.terminal.width as f32 / cell_w).floor() as usize;
+                    let rows = (regions.terminal.height as f32 / cell_h).floor() as usize;
+                    self.session_mgr
+                        .resize(session_id, rows.max(1), cols.max(1));
+                }
+            }
+            ViewMode::Split => {
+                // Per-pane resize: each pane gets its own grid dimensions
+                let terminal_width = regions.terminal.width;
+                for pane in self.layout.layout().panes().to_vec() {
+                    if let Some(session_id) = pane.session_id {
+                        let (rows, cols) = pane.grid_size(terminal_width, height, cell_w, cell_h);
+                        self.session_mgr.resize(session_id, rows, cols);
+                    }
+                }
             }
         }
     }
