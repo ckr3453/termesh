@@ -99,6 +99,11 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Request a redraw every frame to pick up PTY output
+        self.request_redraw();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -228,12 +233,53 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // No action matched — forward raw text to PTY/terminal
-                if let Some(text) = &event.text {
+                // Try special keys first (Enter, Backspace, arrows, etc.)
+                let special_bytes = match &event.logical_key {
+                    winit::keyboard::Key::Named(named) => match named {
+                        winit::keyboard::NamedKey::Enter => Some(b"\r".as_slice()),
+                        winit::keyboard::NamedKey::Backspace => Some(b"\x7f".as_slice()),
+                        winit::keyboard::NamedKey::Tab => Some(b"\t".as_slice()),
+                        winit::keyboard::NamedKey::Escape => Some(b"\x1b".as_slice()),
+                        winit::keyboard::NamedKey::ArrowUp => Some(b"\x1b[A".as_slice()),
+                        winit::keyboard::NamedKey::ArrowDown => Some(b"\x1b[B".as_slice()),
+                        winit::keyboard::NamedKey::ArrowRight => Some(b"\x1b[C".as_slice()),
+                        winit::keyboard::NamedKey::ArrowLeft => Some(b"\x1b[D".as_slice()),
+                        winit::keyboard::NamedKey::Home => Some(b"\x1b[H".as_slice()),
+                        winit::keyboard::NamedKey::End => Some(b"\x1b[F".as_slice()),
+                        winit::keyboard::NamedKey::Delete => Some(b"\x1b[3~".as_slice()),
+                        winit::keyboard::NamedKey::PageUp => Some(b"\x1b[5~".as_slice()),
+                        winit::keyboard::NamedKey::PageDown => Some(b"\x1b[6~".as_slice()),
+                        winit::keyboard::NamedKey::Insert => Some(b"\x1b[2~".as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                let input = if let Some(bytes) = special_bytes {
+                    Some(bytes.to_vec())
+                } else if modifiers.ctrl {
+                    // Ctrl+letter → control character (e.g., Ctrl+C = 0x03)
+                    if let winit::keyboard::Key::Character(c) = &event.logical_key {
+                        let ch = c.as_str().chars().next().unwrap_or('\0');
+                        if ch.is_ascii_lowercase() {
+                            Some(vec![ch as u8 - b'a' + 1])
+                        } else if ch.is_ascii_uppercase() {
+                            Some(vec![ch as u8 - b'A' + 1])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    event.text.as_ref().map(|text| text.as_bytes().to_vec())
+                };
+
+                if let Some(bytes) = input {
                     if let Some(cb) = &mut self.callbacks {
-                        cb.on_input(text.as_bytes());
+                        cb.on_input(&bytes);
                     } else if let Some(terminal) = &mut self.terminal {
-                        terminal.feed_bytes(text.as_bytes());
+                        terminal.feed_bytes(&bytes);
                     }
                     self.request_redraw();
                 }
