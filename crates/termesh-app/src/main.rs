@@ -11,7 +11,9 @@ use session_manager::SessionManager;
 use std::path::PathBuf;
 use termesh_agent::preset::WorkspacePreset;
 use termesh_core::types::{AgentState, SplitLayout, ViewMode};
-use termesh_diff::diff_generator::DiffLine;
+use termesh_diff::diff_generator::{self, DiffLine};
+use termesh_diff::history::ChangeHistory;
+use termesh_diff::watcher::{FileChangeKind, FileWatcher};
 use termesh_input::action::Action;
 use termesh_layout::focus_layout::FocusLayout;
 use termesh_layout::session_list::SessionEntry;
@@ -39,10 +41,15 @@ struct TermeshCallbacks {
     diff_lines: Vec<DiffLine>,
     /// Scroll offset for the side panel diff view.
     side_panel_scroll: usize,
+    /// File watcher for detecting workspace file changes.
+    file_watcher: Option<FileWatcher>,
+    /// File change history for diff generation.
+    change_history: ChangeHistory,
 }
 
 impl TermeshCallbacks {
     fn new() -> Self {
+        let file_watcher = Self::start_watcher(None);
         Self {
             session_mgr: SessionManager::new(),
             layout: SplitLayoutManager::new(SplitLayout::Dual),
@@ -53,6 +60,8 @@ impl TermeshCallbacks {
             show_session_list: true,
             diff_lines: Vec::new(),
             side_panel_scroll: 0,
+            file_watcher,
+            change_history: ChangeHistory::new(),
         }
     }
 
@@ -70,6 +79,14 @@ impl TermeshCallbacks {
             _ => ViewMode::Split,
         };
 
+        // Use first pane's cwd as the watch root
+        let watch_root = preset
+            .panes
+            .first()
+            .and_then(|p| p.cwd.as_ref())
+            .map(PathBuf::from);
+        let file_watcher = Self::start_watcher(watch_root.as_deref());
+
         let mut callbacks = Self {
             session_mgr: SessionManager::new(),
             layout: SplitLayoutManager::new(split),
@@ -80,6 +97,8 @@ impl TermeshCallbacks {
             show_session_list: true,
             diff_lines: Vec::new(),
             side_panel_scroll: 0,
+            file_watcher,
+            change_history: ChangeHistory::new(),
         };
 
         // For single-pane presets, close the extra pane created by Dual layout
@@ -197,6 +216,65 @@ impl TermeshCallbacks {
     fn focused_session(&self) -> Option<termesh_core::types::SessionId> {
         self.layout.layout().focused_pane().session_id
     }
+
+    /// Start a FileWatcher on the given path, or current directory if None.
+    fn start_watcher(root: Option<&std::path::Path>) -> Option<FileWatcher> {
+        let path = match root {
+            Some(p) => p.to_path_buf(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        if !path.is_dir() {
+            return None;
+        }
+        match FileWatcher::new(&path) {
+            Ok(w) => {
+                log::info!("file watcher started: {}", path.display());
+                Some(w)
+            }
+            Err(e) => {
+                log::warn!("failed to start file watcher: {e}");
+                None
+            }
+        }
+    }
+
+    /// Poll file watcher for changes and update diff_lines.
+    fn poll_file_changes(&mut self) {
+        let watcher = match &self.file_watcher {
+            Some(w) => w,
+            None => return,
+        };
+
+        let changes = watcher.drain();
+        if changes.is_empty() {
+            return;
+        }
+
+        let mut updated = false;
+        for change in changes {
+            match change.kind {
+                FileChangeKind::Created | FileChangeKind::Modified => {
+                    if self.change_history.record_change(&change.path) {
+                        updated = true;
+                    }
+                }
+                FileChangeKind::Removed => {
+                    // Skip removed files for diff display
+                }
+            }
+        }
+
+        if updated {
+            // Rebuild diff_lines from the most recent change
+            self.diff_lines.clear();
+            for record in self.change_history.recent(1) {
+                if let Some(old) = &record.old_content {
+                    let diff = diff_generator::diff_texts(old, &record.new_content);
+                    self.diff_lines = diff.lines;
+                }
+            }
+        }
+    }
 }
 
 impl AppCallbacks for TermeshCallbacks {
@@ -264,6 +342,9 @@ impl AppCallbacks for TermeshCallbacks {
 
         // Sync agent states to session list
         self.sync_agent_states();
+
+        // Poll file watcher for changes and update diff
+        self.poll_file_changes();
 
         let (screen_w, screen_h) = self.window_size;
         let (cell_w, cell_h) = self.cell_size;
