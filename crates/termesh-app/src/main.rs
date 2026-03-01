@@ -144,11 +144,23 @@ impl AppCallbacks for TermeshCallbacks {
             .collect()
     }
 
-    fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32) {
+    fn on_resize(
+        &mut self,
+        _rows: usize,
+        _cols: usize,
+        width: u32,
+        height: u32,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
         self.window_size = (width, height);
-        // For now, resize all sessions to the same grid size.
-        // Per-pane resize will be implemented in task 036.
-        self.session_mgr.resize_all(rows, cols);
+        // Per-pane resize: each pane gets its own grid dimensions
+        for pane in self.layout.layout().panes().to_vec() {
+            if let Some(session_id) = pane.session_id {
+                let (rows, cols) = pane.grid_size(width, height, cell_w, cell_h);
+                self.session_mgr.resize(session_id, rows, cols);
+            }
+        }
     }
 
     fn on_scroll(&mut self, delta: i32) {

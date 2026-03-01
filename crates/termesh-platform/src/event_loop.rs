@@ -35,7 +35,16 @@ pub trait AppCallbacks {
 
     /// Called when the window is resized.
     /// `rows`/`cols` are grid dimensions, `width`/`height` are pixel dimensions.
-    fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32);
+    /// `cell_w`/`cell_h` are font cell dimensions in pixels for per-pane grid calculation.
+    fn on_resize(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        width: u32,
+        height: u32,
+        cell_w: f32,
+        cell_h: f32,
+    );
 
     /// Called when the user scrolls (mouse wheel / trackpad).
     /// Positive delta = scroll up (view older output), negative = scroll down.
@@ -248,7 +257,15 @@ impl ApplicationHandler for App {
                     let (rows, cols) = renderer.grid_size();
 
                     if let Some(cb) = &mut self.callbacks {
-                        cb.on_resize(rows, cols, width, height);
+                        let metrics = renderer.font_metrics();
+                        cb.on_resize(
+                            rows,
+                            cols,
+                            width,
+                            height,
+                            metrics.cell_width,
+                            metrics.cell_height,
+                        );
                     } else if let Some(terminal) = &mut self.terminal {
                         terminal.resize(rows, cols);
                     }
