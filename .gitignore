@@ -1,0 +1,22 @@
+/target
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Binary artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

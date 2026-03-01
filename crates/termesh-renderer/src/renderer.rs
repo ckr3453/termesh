@@ -1,0 +1,799 @@
+//! Main GPU renderer for the terminal grid.
+
+use crate::font::{load_builtin_font, FontMetrics, LoadedFont};
+use crate::glyph_cache::GlyphCache;
+use termesh_terminal::grid::GridSnapshot;
+use wgpu::util::DeviceExt;
+
+/// Per-instance data sent to the GPU for each cell.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CellInstance {
+    cell_pos: [f32; 2],
+    cell_size: [f32; 2],
+    fg_color: [f32; 4],
+    bg_color: [f32; 4],
+    uv_offset: [f32; 2],
+    uv_size: [f32; 2],
+    glyph_offset: [f32; 2],
+    glyph_size: [f32; 2],
+    has_glyph: f32,
+    _padding: f32,
+}
+
+/// Uniform buffer data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    projection: [[f32; 4]; 4],
+}
+
+/// GPU terminal renderer.
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    bg_pipeline: wgpu::RenderPipeline,
+    glyph_pipeline: wgpu::RenderPipeline,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    atlas_texture: wgpu::Texture,
+    atlas_bind_group: wgpu::BindGroup,
+    font: LoadedFont,
+    glyph_cache: GlyphCache,
+    width: u32,
+    height: u32,
+    /// Frame counter for cursor blink (toggles every ~30 frames at 60fps = 0.5s).
+    frame_count: u32,
+}
+
+impl Renderer {
+    /// Create a new renderer for the given window surface.
+    ///
+    /// Automatically selects the best available GPU backend (Metal on macOS,
+    /// DX12/Vulkan on Windows, Vulkan on Linux). Falls back to a software
+    /// renderer when no hardware GPU is available.
+    pub async fn new(
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+        font_size: f32,
+    ) -> Result<Self, termesh_core::error::RenderError> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window).map_err(|e| {
+            termesh_core::error::RenderError::GpuInitFailed {
+                reason: format!("surface creation failed: {e}"),
+            }
+        })?;
+
+        // Try hardware adapter first, then fall back to software renderer
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+        {
+            Some(adapter) => adapter,
+            None => {
+                log::warn!("no hardware GPU adapter found, trying software fallback");
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: Some(&surface),
+                        force_fallback_adapter: true,
+                    })
+                    .await
+                    .ok_or(termesh_core::error::RenderError::GpuInitFailed {
+                        reason: "no compatible GPU adapter found (hardware or software)"
+                            .to_string(),
+                    })?
+            }
+        };
+
+        let info = adapter.get_info();
+        log::info!(
+            "GPU adapter: {} ({:?}, {:?})",
+            info.name,
+            info.backend,
+            info.device_type
+        );
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("termesh"),
+                    required_features: wgpu::Features::empty(),
+                    // Use downlevel defaults for broader compatibility across
+                    // different GPU backends (integrated GPUs, older hardware).
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(|e| termesh_core::error::RenderError::GpuInitFailed {
+                reason: format!("device request failed: {e}"),
+            })?;
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        // Prefer non-sRGB format to avoid double gamma correction.
+        // Terminal colors are already in sRGB space (ANSI u8 values),
+        // so we pass them directly without linear conversion.
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| !f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo, // VSync = 60fps
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        // Load font
+        let font = load_builtin_font(font_size).map_err(|_| {
+            termesh_core::error::RenderError::FontLoadFailed {
+                path: "<builtin>".into(),
+            }
+        })?;
+
+        // Create glyph cache + atlas texture
+        let glyph_cache = GlyphCache::new();
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph_atlas"),
+            size: wgpu::Extent3d {
+                width: glyph_cache.atlas_width,
+                height: glyph_cache.atlas_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Shader module
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("terminal_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/terminal.wgsl").into()),
+        });
+
+        // Uniform buffer + bind group
+        let projection = ortho_projection(width as f32, height as f32);
+        let uniforms = Uniforms { projection };
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("uniforms"),
+            contents: bytemuck::cast_slice(&[uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("uniform_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("uniform_bind_group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Atlas texture bind group
+        let atlas_view = atlas_texture.create_view(&Default::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let atlas_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("atlas_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas_bind_group"),
+            layout: &atlas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
+        // Instance vertex layout
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<CellInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 8,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 32,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 48,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 56,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 64,
+                    shader_location: 6,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 72,
+                    shader_location: 7,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 80,
+                    shader_location: 8,
+                },
+            ],
+        };
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pipeline_layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout, &atlas_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Background pipeline (opaque)
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bg_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_background"),
+                buffers: std::slice::from_ref(&instance_layout),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_background"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Glyph pipeline (alpha blended)
+        let glyph_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glyph_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_glyph"),
+                buffers: &[instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_glyph"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Ok(Self {
+            device,
+            queue,
+            surface,
+            surface_config,
+            bg_pipeline,
+            glyph_pipeline,
+            uniform_buffer,
+            uniform_bind_group,
+            atlas_texture,
+            atlas_bind_group,
+            font,
+            glyph_cache,
+            width,
+            height,
+            frame_count: 0,
+        })
+    }
+
+    /// Resize the renderer surface.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+
+        // Update projection matrix
+        let projection = ortho_projection(width as f32, height as f32);
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[Uniforms { projection }]),
+        );
+    }
+
+    /// Get font metrics.
+    pub fn font_metrics(&self) -> FontMetrics {
+        self.font.metrics
+    }
+
+    /// Render a terminal grid snapshot to the screen (full screen).
+    pub fn render(&mut self, grid: &GridSnapshot) -> Result<(), wgpu::SurfaceError> {
+        self.render_grids(&[(grid, 0.0, 0.0)], &[])
+    }
+
+    /// Render multiple grid snapshots at different screen positions.
+    ///
+    /// Each entry is (grid, x_offset, y_offset) in pixel coordinates.
+    /// `dividers` is a list of (x, y, length, is_vertical, color) for pane borders.
+    pub fn render_grids(
+        &mut self,
+        grids: &[(&GridSnapshot, f32, f32)],
+        dividers: &[(f32, f32, f32, bool, [f32; 4])],
+    ) -> Result<(), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&Default::default());
+
+        let metrics = self.font.metrics;
+        let atlas_w = self.glyph_cache.atlas_width as f32;
+        let atlas_h = self.glyph_cache.atlas_height as f32;
+
+        // Cursor blink: visible for 30 frames, hidden for 30 frames (~0.5s each at 60fps)
+        self.frame_count = self.frame_count.wrapping_add(1);
+        let cursor_visible = (self.frame_count / 30).is_multiple_of(2);
+
+        let mut bg_instances = Vec::new();
+        let mut glyph_instances = Vec::new();
+        let mut cursor_instances = Vec::new();
+
+        for &(grid, x_offset, y_offset) in grids {
+            // Add cursor block if visible
+            if cursor_visible && grid.cursor.visible {
+                let cx = x_offset + grid.cursor.col as f32 * metrics.cell_width;
+                let cy = y_offset + grid.cursor.row as f32 * metrics.cell_height;
+                cursor_instances.push(CellInstance {
+                    cell_pos: [cx, cy],
+                    cell_size: [metrics.cell_width, metrics.cell_height],
+                    fg_color: [0.0, 0.0, 0.0, 1.0],
+                    bg_color: [0.8, 0.8, 0.8, 1.0], // opaque light gray cursor block
+                    uv_offset: [0.0, 0.0],
+                    uv_size: [0.0, 0.0],
+                    glyph_offset: [0.0, 0.0],
+                    glyph_size: [0.0, 0.0],
+                    has_glyph: 0.0,
+                    _padding: 0.0,
+                });
+            }
+
+            for cell in &grid.cells {
+                // Skip spacer cells (placeholder after wide characters).
+                // The wide char itself covers 2 cell widths, so the spacer
+                // should not render its own background or glyph.
+                if cell.spacer {
+                    continue;
+                }
+
+                let x = (x_offset + cell.col as f32 * metrics.cell_width).floor();
+                let y = (y_offset + cell.row as f32 * metrics.cell_height).floor();
+                // Pixel-snapped cell size for backgrounds (avoids sub-pixel gaps).
+                let stride = if cell.wide { 2 } else { 1 };
+                let next_x = (x_offset + (cell.col + stride) as f32 * metrics.cell_width).floor();
+                let next_y = (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
+                let bg_w = next_x - x;
+                let bg_h = next_y - y;
+                // Consistent (non-snapped) cell size for glyph positioning.
+                // Using fractional metrics keeps glyphs at uniform offsets
+                // across all columns, preventing wavy text.
+                let glyph_cell_w = metrics.cell_width * stride as f32;
+                let glyph_cell_h = metrics.cell_height;
+
+                // Check if this cell is within the selection range
+                let selected = grid.selection.is_some_and(|sel| {
+                    let r = cell.row;
+                    let c = cell.col;
+                    if r < sel.start_row || r > sel.end_row {
+                        false
+                    } else if r == sel.start_row && r == sel.end_row {
+                        c >= sel.start_col && c <= sel.end_col
+                    } else if r == sel.start_row {
+                        c >= sel.start_col
+                    } else if r == sel.end_row {
+                        c <= sel.end_col
+                    } else {
+                        true
+                    }
+                });
+
+                // Swap fg/bg for selected cells
+                let (fg, bg) = if selected {
+                    (cell.bg.to_f32_array(), [0.2, 0.4, 0.8, 1.0])
+                } else {
+                    (cell.fg.to_f32_array(), cell.bg.to_f32_array())
+                };
+
+                bg_instances.push(CellInstance {
+                    cell_pos: [x, y],
+                    cell_size: [bg_w, bg_h],
+                    fg_color: fg,
+                    bg_color: bg,
+                    uv_offset: [0.0, 0.0],
+                    uv_size: [0.0, 0.0],
+                    glyph_offset: [0.0, 0.0],
+                    glyph_size: [0.0, 0.0],
+                    has_glyph: 0.0,
+                    _padding: 0.0,
+                });
+
+                if cell.c != ' ' && cell.c != '\0' {
+                    if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
+                        if glyph.width > 0 && glyph.height > 0 {
+                            let gw = glyph.width as f32;
+                            let gh = glyph.height as f32;
+
+                            // Log first occurrence of non-ASCII chars for debugging
+                            if cell.c as u32 > 127 && self.frame_count < 5 {
+                                log::info!(
+                                    "GLYPH '{}' u+{:04X}: glyph={}x{} wide={} spacer={} \
+                                     cell_w={:.1} cell_h={:.1} bg={}x{} primary={}",
+                                    cell.c,
+                                    cell.c as u32,
+                                    glyph.width,
+                                    glyph.height,
+                                    cell.wide,
+                                    cell.spacer,
+                                    glyph_cell_w,
+                                    glyph_cell_h,
+                                    bg_w,
+                                    bg_h,
+                                    self.font.font.has_glyph(cell.c),
+                                );
+                            }
+
+                            // Clamp oversized glyphs (CJK/emoji from fallback fonts)
+                            let scale = (glyph_cell_w / gw).min(glyph_cell_h / gh).min(1.0);
+                            let gw = gw * scale;
+                            let gh = gh * scale;
+
+                            // Primary font glyphs: baseline-aligned positioning
+                            // Fallback font glyphs: center-aligned (different
+                            // baseline metrics make cross-font baseline unreliable)
+                            let from_primary = self.font.font.has_glyph(cell.c);
+                            let (glyph_x, glyph_y) = if from_primary && scale >= 1.0 {
+                                let gx = glyph.bearing_x.round();
+                                let glyph_top = glyph.bearing_y + gh;
+                                let gy = (metrics.baseline - glyph_top).round();
+                                (gx, gy)
+                            } else {
+                                let gx = ((glyph_cell_w - gw) / 2.0).round();
+                                let gy = ((glyph_cell_h - gh) / 2.0).round();
+                                (gx, gy)
+                            };
+
+                            glyph_instances.push(CellInstance {
+                                cell_pos: [x, y],
+                                cell_size: [bg_w, bg_h],
+                                fg_color: fg,
+                                bg_color: bg,
+                                uv_offset: [
+                                    glyph.atlas_x as f32 / atlas_w,
+                                    glyph.atlas_y as f32 / atlas_h,
+                                ],
+                                uv_size: [
+                                    glyph.width as f32 / atlas_w,
+                                    glyph.height as f32 / atlas_h,
+                                ],
+                                glyph_offset: [glyph_x, glyph_y],
+                                glyph_size: [gw, gh],
+                                has_glyph: 1.0,
+                                _padding: 0.0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Upload atlas if dirty
+        if self.glyph_cache.dirty {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                self.glyph_cache.atlas_data(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.glyph_cache.atlas_width * 4),
+                    rows_per_image: Some(self.glyph_cache.atlas_height),
+                },
+                wgpu::Extent3d {
+                    width: self.glyph_cache.atlas_width,
+                    height: self.glyph_cache.atlas_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.glyph_cache.mark_clean();
+        }
+
+        // Create GPU buffers
+        let bg_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bg_instances"),
+                contents: bytemuck::cast_slice(&bg_instances),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let glyph_buffer = if !glyph_instances.is_empty() {
+            Some(
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("glyph_instances"),
+                        contents: bytemuck::cast_slice(&glyph_instances),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
+        } else {
+            None
+        };
+
+        // Encode render pass
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terminal_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.118,
+                            g: 0.118,
+                            b: 0.118,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            // Pass 1: backgrounds
+            render_pass.set_pipeline(&self.bg_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, bg_buffer.slice(..));
+            render_pass.draw(0..4, 0..bg_instances.len() as u32);
+
+            // Pass 2: glyphs
+            if let Some(ref buf) = glyph_buffer {
+                render_pass.set_pipeline(&self.glyph_pipeline);
+                render_pass.set_vertex_buffer(0, buf.slice(..));
+                render_pass.draw(0..4, 0..glyph_instances.len() as u32);
+            }
+
+            // Pass 3: cursor overlay (uses bg_pipeline with alpha blending via glyph_pipeline)
+            if !cursor_instances.is_empty() {
+                let cursor_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("cursor_instances"),
+                            contents: bytemuck::cast_slice(&cursor_instances),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                // Use glyph_pipeline for alpha blending, fs_background just returns bg_color
+                render_pass.set_pipeline(&self.bg_pipeline);
+                render_pass.set_vertex_buffer(0, cursor_buffer.slice(..));
+                render_pass.draw(0..4, 0..cursor_instances.len() as u32);
+            }
+
+            // Pass 4: pane dividers
+            if !dividers.is_empty() {
+                let thickness = 1.0_f32;
+                let divider_instances: Vec<CellInstance> = dividers
+                    .iter()
+                    .map(|&(x, y, length, is_vertical, color)| {
+                        let (w, h) = if is_vertical {
+                            (thickness, length)
+                        } else {
+                            (length, thickness)
+                        };
+                        CellInstance {
+                            cell_pos: [x, y],
+                            cell_size: [w, h],
+                            fg_color: color,
+                            bg_color: color,
+                            uv_offset: [0.0, 0.0],
+                            uv_size: [0.0, 0.0],
+                            glyph_offset: [0.0, 0.0],
+                            glyph_size: [0.0, 0.0],
+                            has_glyph: 0.0,
+                            _padding: 0.0,
+                        }
+                    })
+                    .collect();
+                let divider_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("divider_instances"),
+                            contents: bytemuck::cast_slice(&divider_instances),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                render_pass.set_pipeline(&self.bg_pipeline);
+                render_pass.set_vertex_buffer(0, divider_buffer.slice(..));
+                render_pass.draw(0..4, 0..divider_instances.len() as u32);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        Ok(())
+    }
+
+    /// Get the surface dimensions.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Get the surface texture format being used.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
+    }
+
+    /// Calculate terminal grid dimensions from the surface size.
+    pub fn grid_size(&self) -> (usize, usize) {
+        let metrics = self.font.metrics;
+        let cols = (self.width as f32 / metrics.cell_width).floor() as usize;
+        let rows = (self.height as f32 / metrics.cell_height).floor() as usize;
+        (rows.max(1), cols.max(1))
+    }
+}
+
+/// Build an orthographic projection matrix (top-left origin, pixel coords).
+fn ortho_projection(width: f32, height: f32) -> [[f32; 4]; 4] {
+    [
+        [2.0 / width, 0.0, 0.0, 0.0],
+        [0.0, -2.0 / height, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0, 1.0],
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ortho_projection() {
+        let proj = ortho_projection(800.0, 600.0);
+        // Top-left should map to (-1, 1) in clip space
+        assert!((proj[0][0] - 2.0 / 800.0).abs() < 0.001);
+        assert!((proj[1][1] - (-2.0 / 600.0)).abs() < 0.001);
+        assert!((proj[3][0] - (-1.0)).abs() < 0.001);
+        assert!((proj[3][1] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cell_instance_size() {
+        // Ensure CellInstance is properly aligned for GPU
+        assert_eq!(std::mem::size_of::<CellInstance>(), 88);
+    }
+
+    #[test]
+    fn test_uniforms_size() {
+        assert_eq!(std::mem::size_of::<Uniforms>(), 64);
+    }
+}

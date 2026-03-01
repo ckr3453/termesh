@@ -37,3 +37,4 @@ role = "백엔드 API 개발"
 
 ## 노트
 - 프리셋은 `~/.config/termesh/` 또는 프로젝트 루트 `.termesh.toml`에서 읽음
+## 완료: 2026-03-01

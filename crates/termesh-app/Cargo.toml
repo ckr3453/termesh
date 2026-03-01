@@ -1,0 +1,23 @@
+[package]
+name = "termesh-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "termesh"
+path = "src/main.rs"
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+termesh-agent = { path = "../termesh-agent" }
+termesh-diff = { path = "../termesh-diff" }
+termesh-layout = { path = "../termesh-layout" }
+termesh-input = { path = "../termesh-input" }
+termesh-platform = { path = "../termesh-platform" }
+termesh-pty = { path = "../termesh-pty" }
+termesh-terminal = { path = "../termesh-terminal" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+log = "0.4"
+env_logger = "0.11"

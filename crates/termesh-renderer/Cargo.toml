@@ -1,0 +1,13 @@
+[package]
+name = "termesh-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+termesh-core = { path = "../termesh-core" }
+termesh-terminal = { path = "../termesh-terminal" }
+wgpu = "24"
+fontdue = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
