@@ -1,4 +1,10 @@
 [advisories]
+# Transitive deps may include unmaintained crates; warn but don't block
+ignore = [
+    "RUSTSEC-2024-0384", # instant (unmaintained, transitive via wgpu)
+    "RUSTSEC-2024-0436", # paste (unmaintained, transitive)
+    "RUSTSEC-2024-0041", # serial (unmaintained, transitive via portable-pty)
+]
 
 [licenses]
 allow = [
@@ -14,20 +20,6 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
-
-# Our workspace crates don't have LICENSE files yet; allow them
-exceptions = [
-    { allow = ["MIT"], crate = "termesh-core" },
-    { allow = ["MIT"], crate = "termesh-pty" },
-    { allow = ["MIT"], crate = "termesh-terminal" },
-    { allow = ["MIT"], crate = "termesh-renderer" },
-    { allow = ["MIT"], crate = "termesh-layout" },
-    { allow = ["MIT"], crate = "termesh-input" },
-    { allow = ["MIT"], crate = "termesh-agent" },
-    { allow = ["MIT"], crate = "termesh-diff" },
-    { allow = ["MIT"], crate = "termesh-platform" },
-    { allow = ["MIT"], crate = "termesh-app" },
-]
 
 [bans]
 multiple-versions = "warn"

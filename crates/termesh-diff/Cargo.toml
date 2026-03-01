@@ -2,6 +2,7 @@
 name = "termesh-diff"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 similar = "2"

@@ -2,6 +2,7 @@
 name = "termesh-layout"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 termesh-core = { path = "../termesh-core" }
