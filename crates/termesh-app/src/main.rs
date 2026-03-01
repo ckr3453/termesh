@@ -8,6 +8,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use session_manager::SessionManager;
 use termesh_input::action::Action;
+use termesh_layout::split_layout::{Direction, SplitLayoutManager};
 use termesh_platform::event_loop::{self, AppCallbacks, PlatformConfig};
 use termesh_pty::session::SessionConfig;
 use termesh_terminal::grid::GridSnapshot;
@@ -15,42 +16,96 @@ use termesh_terminal::grid::GridSnapshot;
 /// Bridges the platform event loop to the session manager.
 struct TermeshCallbacks {
     session_mgr: SessionManager,
+    layout: SplitLayoutManager,
+    /// Window size in pixels (for layout calculations).
+    window_size: (u32, u32),
 }
 
 impl TermeshCallbacks {
     fn new() -> Self {
         Self {
             session_mgr: SessionManager::new(),
+            layout: SplitLayoutManager::new(termesh_core::types::SplitLayout::Dual),
+            window_size: (800, 600),
         }
     }
 
-    /// Spawn the default shell session.
-    fn spawn_default_shell(&mut self) {
+    /// Spawn a new shell session and bind it to a specific pane.
+    fn spawn_and_bind(&mut self, pane_id: termesh_core::types::PaneId) {
         let config = SessionConfig::default();
-        if let Err(e) = self.session_mgr.spawn(config) {
-            log::error!("failed to spawn default shell: {e}");
+        match self.session_mgr.spawn(config) {
+            Ok(session_id) => {
+                self.layout.bind_session(pane_id, session_id);
+            }
+            Err(e) => {
+                log::error!("failed to spawn shell: {e}");
+            }
         }
+    }
+
+    /// Spawn the default shell session in the first pane.
+    fn spawn_default_shell(&mut self) {
+        let first_pane_id = self.layout.layout().panes()[0].id;
+        self.spawn_and_bind(first_pane_id);
+    }
+
+    /// Get the session ID bound to the focused pane.
+    fn focused_session(&self) -> Option<termesh_core::types::SessionId> {
+        self.layout.layout().focused_pane().session_id
     }
 }
 
 impl AppCallbacks for TermeshCallbacks {
     fn on_input(&mut self, text: &[u8]) {
-        let _ = self.session_mgr.write_active(text);
+        // Send input to the session bound to the focused pane
+        if let Some(session_id) = self.focused_session() {
+            let _ = self.session_mgr.write_to(session_id, text);
+        }
     }
 
     fn on_action(&mut self, action: Action) {
         match action {
-            Action::ToggleMode => log::info!("action: ToggleMode"),
+            Action::SplitHorizontal => {
+                let new_pane_id = self.layout.layout_mut().split_horizontal();
+                self.spawn_and_bind(new_pane_id);
+            }
+            Action::SplitVertical => {
+                let new_pane_id = self.layout.layout_mut().split_vertical();
+                self.spawn_and_bind(new_pane_id);
+            }
+            Action::ClosePane => {
+                let focused = self.layout.layout().focused_pane().clone();
+                if let Some(session_id) = focused.session_id {
+                    self.session_mgr.remove(session_id);
+                }
+                self.layout.layout_mut().close_pane(focused.id);
+            }
+            Action::FocusNext => {
+                self.layout.focus_next();
+            }
+            Action::FocusPrev => {
+                self.layout.focus_prev();
+            }
+            Action::NavigateLeft => {
+                let (w, h) = self.window_size;
+                self.layout.focus_direction(Direction::Left, w, h);
+            }
+            Action::NavigateDown => {
+                let (w, h) = self.window_size;
+                self.layout.focus_direction(Direction::Down, w, h);
+            }
+            Action::NavigateUp => {
+                let (w, h) = self.window_size;
+                self.layout.focus_direction(Direction::Up, w, h);
+            }
+            Action::NavigateRight => {
+                let (w, h) = self.window_size;
+                self.layout.focus_direction(Direction::Right, w, h);
+            }
+            Action::ToggleMode => {
+                self.layout.toggle_zoom();
+            }
             Action::ToggleSidePanel => log::info!("action: ToggleSidePanel"),
-            Action::NavigateLeft => log::info!("action: NavigateLeft"),
-            Action::NavigateDown => log::info!("action: NavigateDown"),
-            Action::NavigateUp => log::info!("action: NavigateUp"),
-            Action::NavigateRight => log::info!("action: NavigateRight"),
-            Action::FocusNext => log::info!("action: FocusNext"),
-            Action::FocusPrev => log::info!("action: FocusPrev"),
-            Action::SplitHorizontal => log::info!("action: SplitHorizontal"),
-            Action::SplitVertical => log::info!("action: SplitVertical"),
-            Action::ClosePane => log::info!("action: ClosePane"),
             Action::Copy | Action::Paste => { /* handled by platform layer */ }
         }
     }
@@ -59,23 +114,33 @@ impl AppCallbacks for TermeshCallbacks {
         // Process pending PTY output
         self.session_mgr.process_events();
 
-        // Return active session's grid at (0,0) for now
+        let (screen_w, screen_h) = self.window_size;
         let mut grids = Vec::new();
-        if let Some(id) = self.session_mgr.active() {
-            if let Some(terminal) = self.session_mgr.terminal(id) {
-                grids.push((terminal.render_grid(), 0.0, 0.0));
+
+        for pane in self.layout.layout().panes() {
+            if !self.layout.is_pane_visible(pane.id) {
+                continue;
+            }
+            if let Some(session_id) = pane.session_id {
+                if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                    let rect = pane.pixel_rect(screen_w, screen_h);
+                    grids.push((terminal.render_grid(), rect.x as f32, rect.y as f32));
+                }
             }
         }
         grids
     }
 
-    fn on_resize(&mut self, rows: usize, cols: usize) {
+    fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32) {
+        self.window_size = (width, height);
+        // For now, resize all sessions to the same grid size.
+        // Per-pane resize will be implemented in task 036.
         self.session_mgr.resize_all(rows, cols);
     }
 
     fn on_scroll(&mut self, delta: i32) {
-        if let Some(id) = self.session_mgr.active() {
-            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+        if let Some(session_id) = self.focused_session() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
                 if delta > 0 {
                     terminal.scroll_up(delta as usize);
                 } else {
@@ -86,16 +151,16 @@ impl AppCallbacks for TermeshCallbacks {
     }
 
     fn on_mouse_press(&mut self, row: usize, col: usize) {
-        if let Some(id) = self.session_mgr.active() {
-            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+        if let Some(session_id) = self.focused_session() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
                 terminal.selection_start(row, col);
             }
         }
     }
 
     fn on_mouse_drag(&mut self, row: usize, col: usize) {
-        if let Some(id) = self.session_mgr.active() {
-            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+        if let Some(session_id) = self.focused_session() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
                 terminal.selection_update(row, col);
             }
         }
@@ -106,13 +171,19 @@ impl AppCallbacks for TermeshCallbacks {
     }
 
     fn on_copy(&mut self) -> Option<String> {
-        let id = self.session_mgr.active()?;
-        let terminal = self.session_mgr.terminal(id)?;
+        let session_id = self.focused_session()?;
+        let terminal = self.session_mgr.terminal(session_id)?;
         terminal.selected_text()
     }
 
     fn on_paste(&mut self, text: &str) {
-        let _ = self.session_mgr.write_active(text.as_bytes());
+        if let Some(session_id) = self.focused_session() {
+            let _ = self.session_mgr.write_to(session_id, text.as_bytes());
+        }
+    }
+
+    fn should_exit(&self) -> bool {
+        self.session_mgr.is_empty()
     }
 }
 

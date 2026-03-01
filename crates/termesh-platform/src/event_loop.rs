@@ -30,7 +30,8 @@ pub trait AppCallbacks {
     fn on_tick(&mut self) -> Vec<(termesh_terminal::grid::GridSnapshot, f32, f32)>;
 
     /// Called when the window is resized.
-    fn on_resize(&mut self, rows: usize, cols: usize);
+    /// `rows`/`cols` are grid dimensions, `width`/`height` are pixel dimensions.
+    fn on_resize(&mut self, rows: usize, cols: usize, width: u32, height: u32);
 
     /// Called when the user scrolls (mouse wheel / trackpad).
     /// Positive delta = scroll up (view older output), negative = scroll down.
@@ -50,6 +51,9 @@ pub trait AppCallbacks {
 
     /// Called to paste text from clipboard.
     fn on_paste(&mut self, text: &str);
+
+    /// Returns true if the application should exit (e.g., no sessions left).
+    fn should_exit(&self) -> bool;
 }
 
 /// Configuration for launching the platform event loop.
@@ -240,7 +244,7 @@ impl ApplicationHandler for App {
                     let (rows, cols) = renderer.grid_size();
 
                     if let Some(cb) = &mut self.callbacks {
-                        cb.on_resize(rows, cols);
+                        cb.on_resize(rows, cols, width, height);
                     } else if let Some(terminal) = &mut self.terminal {
                         terminal.resize(rows, cols);
                     }
@@ -249,6 +253,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Check if the application wants to exit (e.g., all sessions closed)
+                if let Some(cb) = &self.callbacks {
+                    if cb.should_exit() {
+                        event_loop.exit();
+                        return;
+                    }
+                }
+
                 if let Some(renderer) = &mut self.renderer {
                     let result = if let Some(cb) = &mut self.callbacks {
                         // App-managed rendering: get grids from callbacks

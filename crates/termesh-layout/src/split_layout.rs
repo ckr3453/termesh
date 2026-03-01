@@ -51,6 +51,11 @@ impl SplitLayoutManager {
         &self.layout
     }
 
+    /// Get mutable access to the underlying layout manager.
+    pub fn layout_mut(&mut self) -> &mut LayoutManager {
+        &mut self.layout
+    }
+
     /// Bind a session to a pane.
     pub fn bind_session(&mut self, pane_id: PaneId, session_id: termesh_core::types::SessionId) {
         if let Some(pane) = self.layout.pane_by_id_mut(pane_id) {
