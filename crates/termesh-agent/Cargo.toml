@@ -7,5 +7,5 @@ license.workspace = true
 [dependencies]
 termesh-core = { path = "../termesh-core" }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.0"
 regex = "1"
