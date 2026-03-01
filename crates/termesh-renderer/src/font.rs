@@ -265,8 +265,10 @@ mod tests {
     #[test]
     fn test_korean_rendered_via_fallback() {
         let font = load_builtin_font(14.0).unwrap();
-        if font.fallbacks.is_empty() {
-            eprintln!("skipping: no fallback fonts on this system");
+        // Skip on systems without Korean-capable fallback fonts (e.g., Ubuntu CI)
+        let has_korean_fallback = font.fallbacks.iter().any(|f| f.has_glyph('가'));
+        if !has_korean_fallback {
+            eprintln!("skipping: no Korean fallback font on this system");
             return;
         }
         let (m, bmp) = font.rasterize('가');
