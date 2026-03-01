@@ -31,6 +31,10 @@ pub trait AppCallbacks {
 
     /// Called when the window is resized.
     fn on_resize(&mut self, rows: usize, cols: usize);
+
+    /// Called when the user scrolls (mouse wheel / trackpad).
+    /// Positive delta = scroll up (view older output), negative = scroll down.
+    fn on_scroll(&mut self, delta: i32);
 }
 
 /// Configuration for launching the platform event loop.
@@ -284,6 +288,29 @@ impl ApplicationHandler for App {
                         cb.on_input(&bytes);
                     } else if let Some(terminal) = &mut self.terminal {
                         terminal.feed_bytes(&bytes);
+                    }
+                    self.request_redraw();
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        // Convert pixel delta to lines (roughly cell_height per line)
+                        (pos.y / 20.0) as i32
+                    }
+                };
+
+                if lines != 0 {
+                    if let Some(cb) = &mut self.callbacks {
+                        cb.on_scroll(lines);
+                    } else if let Some(terminal) = &mut self.terminal {
+                        if lines > 0 {
+                            terminal.scroll_up(lines as usize);
+                        } else {
+                            terminal.scroll_down((-lines) as usize);
+                        }
                     }
                     self.request_redraw();
                 }

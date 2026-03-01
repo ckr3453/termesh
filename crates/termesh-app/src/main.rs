@@ -71,9 +71,54 @@ impl AppCallbacks for TermeshCallbacks {
     fn on_resize(&mut self, rows: usize, cols: usize) {
         self.session_mgr.resize_all(rows, cols);
     }
+
+    fn on_scroll(&mut self, delta: i32) {
+        if let Some(id) = self.session_mgr.active() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+                if delta > 0 {
+                    terminal.scroll_up(delta as usize);
+                } else {
+                    terminal.scroll_down((-delta) as usize);
+                }
+            }
+        }
+    }
 }
 
 fn main() {
+    // Initialize logging
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
+
+    // Authentication gate
+    let license_dir = termesh_core::platform::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("license");
+    let store = termesh_core::license::LicenseStore::new(license_dir);
+    match termesh_core::auth_gate::check_auth_local(&store) {
+        termesh_core::auth_gate::AuthState::Authenticated { plan, email } => {
+            log::info!(
+                "authenticated: {} ({})",
+                email.as_deref().unwrap_or("unknown"),
+                plan
+            );
+        }
+        termesh_core::auth_gate::AuthState::OfflineGrace { remaining_secs, .. } => {
+            let hours = remaining_secs / 3600;
+            eprintln!(
+                "warning: offline mode — {}h remaining before re-authentication required",
+                hours
+            );
+        }
+        termesh_core::auth_gate::AuthState::NeedsLogin => {
+            log::warn!("no authentication credentials found — running in trial mode");
+        }
+        termesh_core::auth_gate::AuthState::Failed(reason) => {
+            log::warn!("authentication check failed: {reason} — running in trial mode");
+        }
+    }
+
     // Initialize tokio runtime for async session management
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     let _guard = rt.enter();

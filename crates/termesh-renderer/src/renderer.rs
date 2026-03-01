@@ -44,6 +44,8 @@ pub struct Renderer {
     glyph_cache: GlyphCache,
     width: u32,
     height: u32,
+    /// Frame counter for cursor blink (toggles every ~30 frames at 60fps = 0.5s).
+    frame_count: u32,
 }
 
 impl Renderer {
@@ -390,6 +392,7 @@ impl Renderer {
             glyph_cache,
             width,
             height,
+            frame_count: 0,
         })
     }
 
@@ -437,10 +440,33 @@ impl Renderer {
         let atlas_w = self.glyph_cache.atlas_width as f32;
         let atlas_h = self.glyph_cache.atlas_height as f32;
 
+        // Cursor blink: visible for 30 frames, hidden for 30 frames (~0.5s each at 60fps)
+        self.frame_count = self.frame_count.wrapping_add(1);
+        let cursor_visible = (self.frame_count / 30).is_multiple_of(2);
+
         let mut bg_instances = Vec::new();
         let mut glyph_instances = Vec::new();
+        let mut cursor_instances = Vec::new();
 
         for &(grid, x_offset, y_offset) in grids {
+            // Add cursor block if visible
+            if cursor_visible && grid.cursor.visible {
+                let cx = x_offset + grid.cursor.col as f32 * metrics.cell_width;
+                let cy = y_offset + grid.cursor.row as f32 * metrics.cell_height;
+                cursor_instances.push(CellInstance {
+                    cell_pos: [cx, cy],
+                    cell_size: [metrics.cell_width, metrics.cell_height],
+                    fg_color: [0.0, 0.0, 0.0, 1.0],
+                    bg_color: [0.8, 0.8, 0.8, 1.0], // opaque light gray cursor block
+                    uv_offset: [0.0, 0.0],
+                    uv_size: [0.0, 0.0],
+                    glyph_offset: [0.0, 0.0],
+                    glyph_size: [0.0, 0.0],
+                    has_glyph: 0.0,
+                    _padding: 0.0,
+                });
+            }
+
             for cell in &grid.cells {
                 let x = x_offset + cell.col as f32 * metrics.cell_width;
                 let y = y_offset + cell.row as f32 * metrics.cell_height;
@@ -578,6 +604,21 @@ impl Renderer {
                 render_pass.set_pipeline(&self.glyph_pipeline);
                 render_pass.set_vertex_buffer(0, buf.slice(..));
                 render_pass.draw(0..4, 0..glyph_instances.len() as u32);
+            }
+
+            // Pass 3: cursor overlay (uses bg_pipeline with alpha blending via glyph_pipeline)
+            if !cursor_instances.is_empty() {
+                let cursor_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("cursor_instances"),
+                            contents: bytemuck::cast_slice(&cursor_instances),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                // Use glyph_pipeline for alpha blending, fs_background just returns bg_color
+                render_pass.set_pipeline(&self.bg_pipeline);
+                render_pass.set_vertex_buffer(0, cursor_buffer.slice(..));
+                render_pass.draw(0..4, 0..cursor_instances.len() as u32);
             }
         }
 

@@ -18,3 +18,4 @@ termesh-terminal = { path = "../termesh-terminal" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 log = "0.4"
+env_logger = "0.11"
