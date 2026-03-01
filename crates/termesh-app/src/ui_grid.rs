@@ -807,11 +807,11 @@ mod tests {
     }
 
     #[test]
-    fn test_status_bar_has_rename_hint() {
-        let grid = render_status_bar(60, 1, 0, ViewMode::Focus);
+    fn test_status_bar_has_list_hint() {
+        let grid = render_status_bar(100, 1, 0, ViewMode::Focus);
 
         let text: String = grid.cells.iter().map(|c| c.c).collect();
-        assert!(text.contains("Rename"), "status: '{text}'");
+        assert!(text.contains("List"), "status: '{text}'");
     }
 
     // ── Side panel tests ───────────────────────────────────────────────────
