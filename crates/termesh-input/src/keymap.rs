@@ -150,6 +150,16 @@ impl Keymap {
             Keybinding::new(Modifiers::LOGO, Key::Char('[')),
             Action::FocusPrev,
         );
+        // Ctrl+Shift+C: copy selection
+        map.bind(
+            Keybinding::new(Modifiers::CTRL_SHIFT, Key::Char('c')),
+            Action::Copy,
+        );
+        // Ctrl+Shift+V: paste clipboard
+        map.bind(
+            Keybinding::new(Modifiers::CTRL_SHIFT, Key::Char('v')),
+            Action::Paste,
+        );
 
         map
     }

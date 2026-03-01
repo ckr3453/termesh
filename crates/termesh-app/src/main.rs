@@ -51,6 +51,7 @@ impl AppCallbacks for TermeshCallbacks {
             Action::SplitHorizontal => log::info!("action: SplitHorizontal"),
             Action::SplitVertical => log::info!("action: SplitVertical"),
             Action::ClosePane => log::info!("action: ClosePane"),
+            Action::Copy | Action::Paste => { /* handled by platform layer */ }
         }
     }
 
@@ -82,6 +83,36 @@ impl AppCallbacks for TermeshCallbacks {
                 }
             }
         }
+    }
+
+    fn on_mouse_press(&mut self, row: usize, col: usize) {
+        if let Some(id) = self.session_mgr.active() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+                terminal.selection_start(row, col);
+            }
+        }
+    }
+
+    fn on_mouse_drag(&mut self, row: usize, col: usize) {
+        if let Some(id) = self.session_mgr.active() {
+            if let Some(terminal) = self.session_mgr.terminal_mut(id) {
+                terminal.selection_update(row, col);
+            }
+        }
+    }
+
+    fn on_mouse_release(&mut self) {
+        // Selection stays visible until next click or explicit clear
+    }
+
+    fn on_copy(&mut self) -> Option<String> {
+        let id = self.session_mgr.active()?;
+        let terminal = self.session_mgr.terminal(id)?;
+        terminal.selected_text()
+    }
+
+    fn on_paste(&mut self, text: &str) {
+        let _ = self.session_mgr.write_active(text.as_bytes());
     }
 }
 

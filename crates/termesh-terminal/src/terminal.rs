@@ -1,6 +1,6 @@
 //! Terminal emulation wrapper around alacritty_terminal.
 
-use crate::grid::{build_renderable_cell, CursorState, GridSnapshot};
+use crate::grid::{build_renderable_cell, CursorState, GridSnapshot, SelectionRange};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -89,6 +89,10 @@ pub struct Terminal {
     listener: TermEventListener,
     rows: usize,
     cols: usize,
+    /// Selection anchor point (where drag started).
+    selection_anchor: Option<(usize, usize)>,
+    /// Selection endpoint (current drag position).
+    selection_end: Option<(usize, usize)>,
 }
 
 impl Terminal {
@@ -115,6 +119,8 @@ impl Terminal {
             listener,
             rows,
             cols,
+            selection_anchor: None,
+            selection_end: None,
         }
     }
 
@@ -154,11 +160,14 @@ impl Terminal {
             visible: true,
         };
 
+        let selection = self.selection_range();
+
         GridSnapshot {
             cells,
             rows,
             cols,
             cursor,
+            selection,
         }
     }
 
@@ -205,6 +214,96 @@ impl Terminal {
     pub fn scroll_to_bottom(&mut self) {
         use alacritty_terminal::grid::Scroll;
         self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Start a text selection at the given grid coordinate.
+    pub fn selection_start(&mut self, row: usize, col: usize) {
+        self.selection_anchor = Some((row, col));
+        self.selection_end = Some((row, col));
+    }
+
+    /// Update the selection endpoint as the mouse drags.
+    pub fn selection_update(&mut self, row: usize, col: usize) {
+        if self.selection_anchor.is_some() {
+            self.selection_end = Some((row, col));
+        }
+    }
+
+    /// Clear the current selection.
+    pub fn selection_clear(&mut self) {
+        self.selection_anchor = None;
+        self.selection_end = None;
+    }
+
+    /// Check if there is an active selection.
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some() && self.selection_end.is_some()
+    }
+
+    /// Get the normalized selection range (start <= end).
+    fn selection_range(&self) -> Option<SelectionRange> {
+        let (ar, ac) = self.selection_anchor?;
+        let (er, ec) = self.selection_end?;
+
+        // Normalize so start <= end
+        let (start_row, start_col, end_row, end_col) = if (ar, ac) <= (er, ec) {
+            (ar, ac, er, ec)
+        } else {
+            (er, ec, ar, ac)
+        };
+
+        Some(SelectionRange {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        })
+    }
+
+    /// Extract the selected text from the grid.
+    pub fn selected_text(&self) -> Option<String> {
+        let range = self.selection_range()?;
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines();
+
+        let mut text = String::new();
+
+        for row_idx in range.start_row..=range.end_row.min(rows.saturating_sub(1)) {
+            let col_start = if row_idx == range.start_row {
+                range.start_col
+            } else {
+                0
+            };
+            let col_end = if row_idx == range.end_row {
+                range.end_col.min(cols.saturating_sub(1))
+            } else {
+                cols.saturating_sub(1)
+            };
+
+            let mut line = String::new();
+            for col_idx in col_start..=col_end {
+                let point = Point::new(Line(row_idx as i32), Column(col_idx));
+                let cell = &grid[point];
+                if cell.c != '\0' {
+                    line.push(cell.c);
+                }
+            }
+
+            // Trim trailing spaces from each line
+            let trimmed = line.trim_end();
+            text.push_str(trimmed);
+
+            if row_idx < range.end_row {
+                text.push('\n');
+            }
+        }
+
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 }
 
@@ -343,5 +442,88 @@ mod tests {
         let term = Terminal::new(24, 80, 10000);
         let grid = term.render_grid();
         assert_eq!(grid.cells.len(), 24 * 80);
+    }
+
+    #[test]
+    fn test_selection_start_and_update() {
+        let mut term = Terminal::new(24, 80, 10000);
+        assert!(!term.has_selection());
+
+        term.selection_start(0, 5);
+        assert!(term.has_selection());
+
+        term.selection_update(0, 10);
+        let grid = term.render_grid();
+        let sel = grid.selection.unwrap();
+        assert_eq!(sel.start_row, 0);
+        assert_eq!(sel.start_col, 5);
+        assert_eq!(sel.end_row, 0);
+        assert_eq!(sel.end_col, 10);
+    }
+
+    #[test]
+    fn test_selection_backward_normalized() {
+        let mut term = Terminal::new(24, 80, 10000);
+        // Drag from (2,10) to (0,5) — backward selection
+        term.selection_start(2, 10);
+        term.selection_update(0, 5);
+
+        let grid = term.render_grid();
+        let sel = grid.selection.unwrap();
+        // Should be normalized: start <= end
+        assert_eq!(sel.start_row, 0);
+        assert_eq!(sel.start_col, 5);
+        assert_eq!(sel.end_row, 2);
+        assert_eq!(sel.end_col, 10);
+    }
+
+    #[test]
+    fn test_selection_clear() {
+        let mut term = Terminal::new(24, 80, 10000);
+        term.selection_start(0, 0);
+        term.selection_update(0, 5);
+        assert!(term.has_selection());
+
+        term.selection_clear();
+        assert!(!term.has_selection());
+        assert!(term.render_grid().selection.is_none());
+    }
+
+    #[test]
+    fn test_selected_text_single_line() {
+        let mut term = Terminal::new(24, 80, 10000);
+        term.feed_bytes(b"Hello World");
+
+        term.selection_start(0, 0);
+        term.selection_update(0, 4);
+        assert_eq!(term.selected_text(), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_multi_line() {
+        let mut term = Terminal::new(24, 80, 10000);
+        term.feed_bytes(b"Line1\r\nLine2\r\nLine3");
+
+        term.selection_start(0, 0);
+        term.selection_update(1, 4);
+        assert_eq!(term.selected_text(), Some("Line1\nLine2".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_no_selection() {
+        let term = Terminal::new(24, 80, 10000);
+        assert_eq!(term.selected_text(), None);
+    }
+
+    #[test]
+    fn test_selection_in_grid_snapshot() {
+        let mut term = Terminal::new(24, 80, 10000);
+        let grid = term.render_grid();
+        assert!(grid.selection.is_none());
+
+        term.selection_start(1, 3);
+        term.selection_update(2, 7);
+        let grid = term.render_grid();
+        assert!(grid.selection.is_some());
     }
 }

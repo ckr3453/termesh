@@ -27,6 +27,10 @@ pub enum Action {
     FocusNext,
     /// Focus the previous pane.
     FocusPrev,
+    /// Copy selected text to clipboard.
+    Copy,
+    /// Paste clipboard contents to PTY.
+    Paste,
 }
 
 #[cfg(test)]

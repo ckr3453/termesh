@@ -476,11 +476,35 @@ impl Renderer {
                     metrics.cell_width
                 };
 
+                // Check if this cell is within the selection range
+                let selected = grid.selection.is_some_and(|sel| {
+                    let r = cell.row;
+                    let c = cell.col;
+                    if r < sel.start_row || r > sel.end_row {
+                        false
+                    } else if r == sel.start_row && r == sel.end_row {
+                        c >= sel.start_col && c <= sel.end_col
+                    } else if r == sel.start_row {
+                        c >= sel.start_col
+                    } else if r == sel.end_row {
+                        c <= sel.end_col
+                    } else {
+                        true
+                    }
+                });
+
+                // Swap fg/bg for selected cells
+                let (fg, bg) = if selected {
+                    (cell.bg.to_f32_array(), [0.2, 0.4, 0.8, 1.0])
+                } else {
+                    (cell.fg.to_f32_array(), cell.bg.to_f32_array())
+                };
+
                 bg_instances.push(CellInstance {
                     cell_pos: [x, y],
                     cell_size: [cell_w, metrics.cell_height],
-                    fg_color: cell.fg.to_f32_array(),
-                    bg_color: cell.bg.to_f32_array(),
+                    fg_color: fg,
+                    bg_color: bg,
                     uv_offset: [0.0, 0.0],
                     uv_size: [0.0, 0.0],
                     glyph_offset: [0.0, 0.0],
@@ -498,8 +522,8 @@ impl Renderer {
                             glyph_instances.push(CellInstance {
                                 cell_pos: [x, y],
                                 cell_size: [metrics.cell_width, metrics.cell_height],
-                                fg_color: cell.fg.to_f32_array(),
-                                bg_color: cell.bg.to_f32_array(),
+                                fg_color: fg,
+                                bg_color: bg,
                                 uv_offset: [
                                     glyph.atlas_x as f32 / atlas_w,
                                     glyph.atlas_y as f32 / atlas_h,

@@ -35,6 +35,21 @@ pub trait AppCallbacks {
     /// Called when the user scrolls (mouse wheel / trackpad).
     /// Positive delta = scroll up (view older output), negative = scroll down.
     fn on_scroll(&mut self, delta: i32);
+
+    /// Called when the mouse button is pressed at a grid coordinate.
+    fn on_mouse_press(&mut self, row: usize, col: usize);
+
+    /// Called when the mouse is dragged to a grid coordinate (selection update).
+    fn on_mouse_drag(&mut self, row: usize, col: usize);
+
+    /// Called when the mouse button is released.
+    fn on_mouse_release(&mut self);
+
+    /// Called to copy selection text. Returns the selected text if any.
+    fn on_copy(&mut self) -> Option<String>;
+
+    /// Called to paste text from clipboard.
+    fn on_paste(&mut self, text: &str);
 }
 
 /// Configuration for launching the platform event loop.
@@ -70,11 +85,18 @@ struct App {
     current_modifiers: winit::event::Modifiers,
     /// Application callbacks for PTY/session integration.
     callbacks: Option<Box<dyn AppCallbacks>>,
+    /// Whether the left mouse button is currently held (for drag selection).
+    mouse_pressed: bool,
+    /// Cached cursor position in pixels.
+    cursor_position: (f64, f64),
+    /// System clipboard.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
     fn new(mut config: PlatformConfig) -> Self {
         let callbacks = config.callbacks.take();
+        let clipboard = arboard::Clipboard::new().ok();
         Self {
             config,
             window: None,
@@ -82,6 +104,9 @@ impl App {
             terminal: None,
             current_modifiers: winit::event::Modifiers::default(),
             callbacks,
+            mouse_pressed: false,
+            cursor_position: (0.0, 0.0),
+            clipboard,
         }
     }
 
@@ -91,12 +116,45 @@ impl App {
         }
     }
 
+    /// Convert pixel position to grid (row, col) using font metrics.
+    fn pixel_to_grid(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        let renderer = self.renderer.as_ref()?;
+        let metrics = renderer.font_metrics();
+        let col = (x as f32 / metrics.cell_width) as usize;
+        let row = (y as f32 / metrics.cell_height) as usize;
+        Some((row, col))
+    }
+
     /// Dispatch a keybinding action.
     fn dispatch_action(&mut self, action: Action) {
-        if let Some(cb) = &mut self.callbacks {
-            cb.on_action(action);
-        } else {
-            log::info!("action: {action:?}");
+        match action {
+            Action::Copy => {
+                let text = if let Some(cb) = &mut self.callbacks {
+                    cb.on_copy()
+                } else {
+                    None
+                };
+                if let Some(text) = text {
+                    if let Some(clipboard) = &mut self.clipboard {
+                        let _ = clipboard.set_text(&text);
+                    }
+                }
+            }
+            Action::Paste => {
+                let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
+                if let Some(text) = text {
+                    if let Some(cb) = &mut self.callbacks {
+                        cb.on_paste(&text);
+                    }
+                }
+            }
+            _ => {
+                if let Some(cb) = &mut self.callbacks {
+                    cb.on_action(action);
+                } else {
+                    log::info!("action: {action:?}");
+                }
+            }
         }
         self.request_redraw();
     }
@@ -290,6 +348,42 @@ impl ApplicationHandler for App {
                         terminal.feed_bytes(&bytes);
                     }
                     self.request_redraw();
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = (position.x, position.y);
+
+                if self.mouse_pressed {
+                    if let Some((row, col)) = self.pixel_to_grid(position.x, position.y) {
+                        if let Some(cb) = &mut self.callbacks {
+                            cb.on_mouse_drag(row, col);
+                        }
+                        self.request_redraw();
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    match state {
+                        ElementState::Pressed => {
+                            self.mouse_pressed = true;
+                            let (x, y) = self.cursor_position;
+                            if let Some((row, col)) = self.pixel_to_grid(x, y) {
+                                if let Some(cb) = &mut self.callbacks {
+                                    cb.on_mouse_press(row, col);
+                                }
+                                self.request_redraw();
+                            }
+                        }
+                        ElementState::Released => {
+                            self.mouse_pressed = false;
+                            if let Some(cb) = &mut self.callbacks {
+                                cb.on_mouse_release();
+                            }
+                        }
+                    }
                 }
             }
 

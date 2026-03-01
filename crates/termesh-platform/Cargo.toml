@@ -11,4 +11,5 @@ termesh-input = { path = "../termesh-input" }
 winit = "0.30"
 wgpu = "24"
 pollster = "0.4"
+arboard = "3"
 log = "0.4"

@@ -57,6 +57,19 @@ pub struct CursorState {
     pub visible: bool,
 }
 
+/// A range of selected text (row, col) coordinates.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SelectionRange {
+    /// Start row (inclusive).
+    pub start_row: usize,
+    /// Start column (inclusive).
+    pub start_col: usize,
+    /// End row (inclusive).
+    pub end_row: usize,
+    /// End column (inclusive).
+    pub end_col: usize,
+}
+
 /// A snapshot of the terminal grid ready for rendering.
 #[derive(Debug, Clone)]
 pub struct GridSnapshot {
@@ -68,6 +81,8 @@ pub struct GridSnapshot {
     pub cols: usize,
     /// Cursor state.
     pub cursor: CursorState,
+    /// Currently selected range (if any).
+    pub selection: Option<SelectionRange>,
 }
 
 impl GridSnapshot {
@@ -237,6 +252,7 @@ mod tests {
                 col: 0,
                 visible: true,
             },
+            selection: None,
         };
         assert_eq!(snapshot.cell_at(0, 0).unwrap().c, 'A');
         assert_eq!(snapshot.cell_at(1, 1).unwrap().c, 'D');
