@@ -92,63 +92,73 @@ impl Keymap {
         }
     }
 
+    /// Platform primary modifier: Ctrl on Windows/Linux, Logo (Cmd) on macOS.
+    #[cfg(target_os = "macos")]
+    pub const PRIMARY: Modifiers = Modifiers::LOGO;
+    #[cfg(not(target_os = "macos"))]
+    pub const PRIMARY: Modifiers = Modifiers::CTRL;
+
+    /// Platform primary + shift modifier.
+    #[cfg(target_os = "macos")]
+    pub const PRIMARY_SHIFT: Modifiers = Modifiers::LOGO_SHIFT;
+    #[cfg(not(target_os = "macos"))]
+    pub const PRIMARY_SHIFT: Modifiers = Modifiers::CTRL_SHIFT;
+
     /// Create the default keymap.
     ///
-    /// Uses Logo (Cmd on macOS, Win on Windows) as the primary modifier.
+    /// Uses Ctrl on Windows/Linux, Cmd on macOS as the primary modifier.
     pub fn default_keymap() -> Self {
         let mut map = Self::new();
+        let p = Self::PRIMARY;
+        let ps = Self::PRIMARY_SHIFT;
 
-        // Cmd+T: split horizontal
+        // Primary+T: split horizontal
+        map.bind(Keybinding::new(p, Key::Char('t')), Action::SplitHorizontal);
+        // Primary+Shift+T: split vertical
+        map.bind(Keybinding::new(ps, Key::Char('t')), Action::SplitVertical);
+        // Primary+W: close pane
+        map.bind(Keybinding::new(p, Key::Char('w')), Action::ClosePane);
+        // Primary+E: toggle side panel
+        map.bind(Keybinding::new(p, Key::Char('e')), Action::ToggleSidePanel);
+        // Primary+1/2/3/4: direct pane focus
+        map.bind(Keybinding::new(p, Key::Char('1')), Action::FocusPane1);
+        map.bind(Keybinding::new(p, Key::Char('2')), Action::FocusPane2);
+        map.bind(Keybinding::new(p, Key::Char('3')), Action::FocusPane3);
+        map.bind(Keybinding::new(p, Key::Char('4')), Action::FocusPane4);
+        // Primary+5/6/7/8/9: session focus
+        map.bind(Keybinding::new(p, Key::Char('5')), Action::FocusPane5);
+        map.bind(Keybinding::new(p, Key::Char('6')), Action::FocusPane6);
+        map.bind(Keybinding::new(p, Key::Char('7')), Action::FocusPane7);
+        map.bind(Keybinding::new(p, Key::Char('8')), Action::FocusPane8);
+        map.bind(Keybinding::new(p, Key::Char('9')), Action::FocusPane9);
+        // Primary+Enter: toggle mode
+        map.bind(Keybinding::new(p, Key::Enter), Action::ToggleMode);
+        // Primary+]: focus next
+        map.bind(Keybinding::new(p, Key::Char(']')), Action::FocusNext);
+        // Primary+[: focus prev
+        map.bind(Keybinding::new(p, Key::Char('[')), Action::FocusPrev);
+        // Primary+N: spawn new session
+        map.bind(Keybinding::new(p, Key::Char('n')), Action::SpawnSession);
+        // Primary+R: rename session
+        map.bind(Keybinding::new(p, Key::Char('r')), Action::RenameSession);
+        // Primary+B: toggle session list
         map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('t')),
-            Action::SplitHorizontal,
+            Keybinding::new(p, Key::Char('b')),
+            Action::ToggleSessionList,
         );
-        // Cmd+Shift+T: split vertical
+        // Primary+Shift+Up: side panel scroll up
+        map.bind(Keybinding::new(ps, Key::Up), Action::SidePanelScrollUp);
+        // Primary+Shift+Down: side panel scroll down
+        map.bind(Keybinding::new(ps, Key::Down), Action::SidePanelScrollDown);
+        // Primary+Shift+]: next side panel tab
         map.bind(
-            Keybinding::new(Modifiers::LOGO_SHIFT, Key::Char('t')),
-            Action::SplitVertical,
+            Keybinding::new(ps, Key::Char(']')),
+            Action::SidePanelNextTab,
         );
-        // Cmd+W: close pane
+        // Primary+Shift+[: prev side panel tab
         map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('w')),
-            Action::ClosePane,
-        );
-        // Cmd+E: toggle side panel
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('e')),
-            Action::ToggleSidePanel,
-        );
-        // Cmd+H/J/K/L: vim-like navigation
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('h')),
-            Action::NavigateLeft,
-        );
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('j')),
-            Action::NavigateDown,
-        );
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('k')),
-            Action::NavigateUp,
-        );
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('l')),
-            Action::NavigateRight,
-        );
-        // Cmd+Enter: toggle mode
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Enter),
-            Action::ToggleMode,
-        );
-        // Cmd+]: focus next
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char(']')),
-            Action::FocusNext,
-        );
-        // Cmd+[: focus prev
-        map.bind(
-            Keybinding::new(Modifiers::LOGO, Key::Char('[')),
-            Action::FocusPrev,
+            Keybinding::new(ps, Key::Char('[')),
+            Action::SidePanelPrevTab,
         );
         // Ctrl+Shift+C: copy selection
         map.bind(
@@ -241,27 +251,27 @@ mod tests {
     fn test_default_keymap_has_bindings() {
         let keymap = Keymap::default_keymap();
         assert!(!keymap.is_empty());
-        assert!(keymap.len() >= 11);
+        assert!(keymap.len() >= 22);
     }
 
     #[test]
-    fn test_lookup_cmd_t() {
+    fn test_lookup_primary_t() {
         let keymap = Keymap::default_keymap();
-        let binding = Keybinding::new(Modifiers::LOGO, Key::Char('t'));
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('t'));
         assert_eq!(keymap.lookup(&binding), Some(&Action::SplitHorizontal));
     }
 
     #[test]
-    fn test_lookup_cmd_shift_t() {
+    fn test_lookup_primary_shift_t() {
         let keymap = Keymap::default_keymap();
-        let binding = Keybinding::new(Modifiers::LOGO_SHIFT, Key::Char('t'));
+        let binding = Keybinding::new(Keymap::PRIMARY_SHIFT, Key::Char('t'));
         assert_eq!(keymap.lookup(&binding), Some(&Action::SplitVertical));
     }
 
     #[test]
-    fn test_lookup_cmd_enter() {
+    fn test_lookup_primary_enter() {
         let keymap = Keymap::default_keymap();
-        let binding = Keybinding::new(Modifiers::LOGO, Key::Enter);
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Enter);
         assert_eq!(keymap.lookup(&binding), Some(&Action::ToggleMode));
     }
 
@@ -313,6 +323,13 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_primary_n_spawn_session() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('n'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::SpawnSession));
+    }
+
+    #[test]
     fn test_parse_invalid() {
         assert!(Keymap::parse_binding("").is_none());
         assert!(Keymap::parse_binding("InvalidMod+X").is_none());
@@ -321,7 +338,7 @@ mod tests {
     #[test]
     fn test_override_binding() {
         let mut keymap = Keymap::default_keymap();
-        let binding = Keybinding::new(Modifiers::LOGO, Key::Char('t'));
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('t'));
         keymap.bind(binding.clone(), Action::ClosePane);
         assert_eq!(keymap.lookup(&binding), Some(&Action::ClosePane));
     }

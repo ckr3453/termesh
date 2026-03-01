@@ -5,12 +5,86 @@ use termesh_core::types::{AgentState, SessionId};
 /// Maximum number of sessions displayed in the list.
 const MAX_SESSIONS: usize = 32;
 
+/// Inline editing state for renaming a session.
+#[derive(Debug, Clone)]
+pub struct EditState {
+    /// Text buffer being edited.
+    buffer: Vec<char>,
+    /// Cursor position within the buffer.
+    cursor: usize,
+    /// Original label (for cancel/restore).
+    original: String,
+}
+
+impl EditState {
+    /// Create a new edit state from an existing label.
+    pub fn new(label: &str) -> Self {
+        let buffer: Vec<char> = label.chars().collect();
+        let cursor = buffer.len();
+        Self {
+            buffer,
+            cursor,
+            original: label.to_string(),
+        }
+    }
+
+    /// Insert a character at the cursor position.
+    pub fn insert(&mut self, c: char) {
+        self.buffer.insert(self.cursor, c);
+        self.cursor += 1;
+    }
+
+    /// Delete the character before the cursor (backspace).
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.buffer.remove(self.cursor);
+        }
+    }
+
+    /// Delete the character at the cursor position.
+    pub fn delete(&mut self) {
+        if self.cursor < self.buffer.len() {
+            self.buffer.remove(self.cursor);
+        }
+    }
+
+    /// Move cursor left.
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    /// Move cursor right.
+    pub fn move_right(&mut self) {
+        if self.cursor < self.buffer.len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Get the current buffer contents as a string.
+    pub fn text(&self) -> String {
+        self.buffer.iter().collect()
+    }
+
+    /// Get the cursor position.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Get the original label.
+    pub fn original(&self) -> &str {
+        &self.original
+    }
+}
+
 /// A single entry in the session list.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
     /// Session identifier.
     pub id: SessionId,
-    /// Display label (e.g., "Backend", "Frontend").
+    /// Display label (e.g., "a3f1b2c9").
     pub label: String,
     /// Whether this session runs an AI agent (vs plain shell).
     pub is_agent: bool,
@@ -25,6 +99,8 @@ pub struct SessionList {
     entries: Vec<SessionEntry>,
     /// Currently selected index.
     selected: usize,
+    /// Inline editing state (active when renaming a session).
+    editing: Option<EditState>,
 }
 
 impl SessionList {
@@ -33,6 +109,7 @@ impl SessionList {
         Self {
             entries: Vec::new(),
             selected: 0,
+            editing: None,
         }
     }
 
@@ -120,6 +197,45 @@ impl SessionList {
     /// Get the selected session ID.
     pub fn selected_id(&self) -> Option<SessionId> {
         self.selected_entry().map(|e| e.id)
+    }
+
+    /// Start editing the currently selected session's label.
+    pub fn start_editing(&mut self) {
+        if let Some(entry) = self.entries.get(self.selected) {
+            self.editing = Some(EditState::new(&entry.label));
+        }
+    }
+
+    /// Confirm editing: apply the buffer as the new label.
+    pub fn confirm_editing(&mut self) {
+        if let Some(edit) = self.editing.take() {
+            let text = edit.text();
+            if !text.is_empty() {
+                if let Some(entry) = self.entries.get_mut(self.selected) {
+                    entry.label = text;
+                }
+            }
+        }
+    }
+
+    /// Cancel editing: discard changes and restore original label.
+    pub fn cancel_editing(&mut self) {
+        self.editing = None;
+    }
+
+    /// Whether a session is currently being edited.
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// Get a reference to the edit state.
+    pub fn edit_state(&self) -> Option<&EditState> {
+        self.editing.as_ref()
+    }
+
+    /// Get a mutable reference to the edit state.
+    pub fn edit_state_mut(&mut self) -> Option<&mut EditState> {
+        self.editing.as_mut()
     }
 }
 
@@ -275,5 +391,134 @@ mod tests {
         list.select_prev();
         list.select_by_id(SessionId(1));
         assert_eq!(list.selected_index(), 0);
+    }
+
+    // ── EditState tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_edit_state_new() {
+        let edit = super::EditState::new("Hello");
+        assert_eq!(edit.text(), "Hello");
+        assert_eq!(edit.cursor(), 5); // cursor at end
+        assert_eq!(edit.original(), "Hello");
+    }
+
+    #[test]
+    fn test_edit_insert_at_cursor() {
+        let mut edit = super::EditState::new("AB");
+        edit.move_left(); // cursor at 1
+        edit.insert('X');
+        assert_eq!(edit.text(), "AXB");
+        assert_eq!(edit.cursor(), 2);
+    }
+
+    #[test]
+    fn test_edit_backspace() {
+        let mut edit = super::EditState::new("ABC");
+        edit.backspace();
+        assert_eq!(edit.text(), "AB");
+        assert_eq!(edit.cursor(), 2);
+    }
+
+    #[test]
+    fn test_edit_backspace_at_beginning() {
+        let mut edit = super::EditState::new("A");
+        edit.move_left();
+        assert_eq!(edit.cursor(), 0);
+        edit.backspace(); // no-op
+        assert_eq!(edit.text(), "A");
+        assert_eq!(edit.cursor(), 0);
+    }
+
+    #[test]
+    fn test_edit_delete() {
+        let mut edit = super::EditState::new("ABC");
+        edit.move_left();
+        edit.move_left(); // cursor at 1
+        edit.delete();
+        assert_eq!(edit.text(), "AC");
+        assert_eq!(edit.cursor(), 1);
+    }
+
+    #[test]
+    fn test_edit_delete_at_end() {
+        let mut edit = super::EditState::new("AB");
+        edit.delete(); // no-op (cursor at end)
+        assert_eq!(edit.text(), "AB");
+    }
+
+    #[test]
+    fn test_edit_move_left_at_zero() {
+        let mut edit = super::EditState::new("A");
+        edit.move_left();
+        assert_eq!(edit.cursor(), 0);
+        edit.move_left(); // no-op
+        assert_eq!(edit.cursor(), 0);
+    }
+
+    #[test]
+    fn test_edit_move_right_at_end() {
+        let mut edit = super::EditState::new("AB");
+        assert_eq!(edit.cursor(), 2);
+        edit.move_right(); // no-op
+        assert_eq!(edit.cursor(), 2);
+    }
+
+    // ── Editing lifecycle tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_start_editing() {
+        let mut list = SessionList::new();
+        list.add(make_entry(1, "Backend", true));
+        list.start_editing();
+        assert!(list.is_editing());
+        assert_eq!(list.edit_state().unwrap().text(), "Backend");
+    }
+
+    #[test]
+    fn test_start_editing_on_empty_list() {
+        let mut list = SessionList::new();
+        list.start_editing();
+        assert!(!list.is_editing());
+    }
+
+    #[test]
+    fn test_confirm_editing_applies_label() {
+        let mut list = SessionList::new();
+        list.add(make_entry(1, "Old", true));
+        list.start_editing();
+        list.edit_state_mut().unwrap().backspace();
+        list.edit_state_mut().unwrap().backspace();
+        list.edit_state_mut().unwrap().backspace();
+        list.edit_state_mut().unwrap().insert('N');
+        list.edit_state_mut().unwrap().insert('e');
+        list.edit_state_mut().unwrap().insert('w');
+        list.confirm_editing();
+        assert!(!list.is_editing());
+        assert_eq!(list.entries()[0].label, "New");
+    }
+
+    #[test]
+    fn test_confirm_editing_rejects_empty() {
+        let mut list = SessionList::new();
+        list.add(make_entry(1, "Keep", true));
+        list.start_editing();
+        // Clear all characters
+        for _ in 0..4 {
+            list.edit_state_mut().unwrap().backspace();
+        }
+        list.confirm_editing();
+        assert_eq!(list.entries()[0].label, "Keep"); // unchanged
+    }
+
+    #[test]
+    fn test_cancel_editing() {
+        let mut list = SessionList::new();
+        list.add(make_entry(1, "Original", true));
+        list.start_editing();
+        list.edit_state_mut().unwrap().insert('X');
+        list.cancel_editing();
+        assert!(!list.is_editing());
+        assert_eq!(list.entries()[0].label, "Original"); // unchanged
     }
 }

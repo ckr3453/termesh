@@ -48,16 +48,40 @@ pub enum AgentState {
 impl fmt::Display for AgentState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let icon = match self {
-            Self::None => "🐚",
-            Self::Idle => "💤",
-            Self::Thinking => "⏳",
-            Self::WritingCode => "✍️",
-            Self::RunningCommand => "▶️",
-            Self::WaitingForInput => "⏸️",
-            Self::Success => "✅",
-            Self::Error => "❌",
+            Self::None => " ",
+            Self::Idle => "\u{00B7}",    // · (middle dot)
+            Self::Thinking => "*",       // spinner placeholder
+            Self::WritingCode => "*",    // spinner placeholder
+            Self::RunningCommand => "*", // spinner placeholder
+            Self::WaitingForInput => "?",
+            Self::Success => "\u{2713}", // ✓
+            Self::Error => "\u{2717}",   // ✗
         };
         write!(f, "{icon}")
+    }
+}
+
+/// Braille spinner frames for animating active agent states.
+pub const SPINNER_FRAMES: &[char] = &[
+    '\u{280B}', // ⠋
+    '\u{2819}', // ⠙
+    '\u{2839}', // ⠹
+    '\u{2838}', // ⠸
+    '\u{283C}', // ⠼
+    '\u{2834}', // ⠴
+    '\u{2826}', // ⠦
+    '\u{2827}', // ⠧
+    '\u{2807}', // ⠇
+    '\u{280F}', // ⠏
+];
+
+impl AgentState {
+    /// Whether this state should display an animated spinner.
+    pub fn is_spinning(&self) -> bool {
+        matches!(
+            self,
+            Self::Thinking | Self::WritingCode | Self::RunningCommand
+        )
     }
 }
 
@@ -77,8 +101,6 @@ pub enum ViewMode {
 pub enum SplitLayout {
     /// Two panes side by side.
     Dual,
-    /// Three panes (1 left + 2 right stacked).
-    Triple,
     /// Four panes in a 2x2 grid.
     #[default]
     Quad,

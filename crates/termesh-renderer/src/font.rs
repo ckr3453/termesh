@@ -48,39 +48,21 @@ impl LoadedFont {
 
     /// Rasterize a single character, trying fallback fonts if needed.
     pub fn rasterize(&self, c: char) -> (fontdue::Metrics, Vec<u8>) {
-        // Try primary font first
-        let (metrics, bitmap) = self.font.rasterize(c, self.metrics.font_size);
-        if !is_notdef(&metrics, &bitmap, c) {
-            return (metrics, bitmap);
+        // Try primary font first (use has_glyph for accurate detection)
+        if self.font.has_glyph(c) {
+            return self.font.rasterize(c, self.metrics.font_size);
         }
 
         // Try fallback fonts
         for fallback in &self.fallbacks {
-            let (fb_metrics, fb_bitmap) = fallback.rasterize(c, self.metrics.font_size);
-            if !is_notdef(&fb_metrics, &fb_bitmap, c) {
-                return (fb_metrics, fb_bitmap);
+            if fallback.has_glyph(c) {
+                return fallback.rasterize(c, self.metrics.font_size);
             }
         }
 
         // No font has this glyph — return primary font's .notdef
-        (metrics, bitmap)
+        self.font.rasterize(c, self.metrics.font_size)
     }
-}
-
-/// Check if a rasterized glyph is likely the .notdef (missing) glyph.
-///
-/// Heuristic: if the glyph has zero dimensions or its bitmap is entirely
-/// empty (all zeros), it's probably .notdef.
-fn is_notdef(metrics: &fontdue::Metrics, bitmap: &[u8], c: char) -> bool {
-    // Space and control chars are expected to have zero dimensions
-    if c.is_ascii_control() || c == ' ' {
-        return false;
-    }
-    if metrics.width == 0 || metrics.height == 0 {
-        return true;
-    }
-    // Check if bitmap is all zeros (blank glyph = likely .notdef)
-    bitmap.iter().all(|&b| b == 0)
 }
 
 /// Compute monospace cell metrics from a font.
@@ -218,44 +200,66 @@ mod tests {
     }
 
     #[test]
-    fn test_is_notdef() {
-        assert!(!is_notdef(
-            &fontdue::Metrics {
-                width: 8,
-                height: 10,
-                ..Default::default()
-            },
-            &[1; 80],
-            'A'
-        ));
-        // Zero-size glyph for non-space
-        assert!(is_notdef(
-            &fontdue::Metrics {
-                width: 0,
-                height: 0,
-                ..Default::default()
-            },
-            &[],
-            'A'
-        ));
-        // Space is not considered notdef even with zero dimensions
-        assert!(!is_notdef(
-            &fontdue::Metrics {
-                width: 0,
-                height: 0,
-                ..Default::default()
-            },
-            &[],
-            ' '
-        ));
-    }
-
-    #[test]
     fn test_fallback_loads_on_system() {
         let font = load_builtin_font(14.0).unwrap();
         // On any dev machine, at least some fallback fonts should exist
         // This test is informational — it won't fail on CI
         eprintln!("fallback fonts loaded: {}", font.fallbacks.len());
+    }
+
+    #[test]
+    fn test_baseline_glyph_positions() {
+        // Test at multiple DPI-scaled sizes
+        for font_size in [14.0_f32, 21.0, 28.0] {
+            let font = load_builtin_font(font_size).unwrap();
+            let m = font.metrics;
+            eprintln!("\n=== font_size={:.0} ===", font_size);
+            eprintln!(
+                "cell: {:.1}x{:.1}, baseline={:.1}",
+                m.cell_width, m.cell_height, m.baseline
+            );
+
+            for c in ['A', 'a', 'g', 'p', 'y', '|', '_', '.'] {
+                let (gm, _) = font.rasterize(c);
+                let gh = gm.height as f32;
+                let glyph_top = gm.ymin as f32 + gh;
+                let baseline_y = (m.baseline - glyph_top).round();
+                let center_y = ((m.cell_height - gh) / 2.0).round();
+                eprintln!(
+                    "  '{}': w={:2} h={:2} xmin={:3} ymin={:3} → baseline_y={:.0} center_y={:.0}",
+                    c, gm.width, gm.height, gm.xmin, gm.ymin, baseline_y, center_y
+                );
+                // Baseline position must be within cell bounds
+                assert!(
+                    baseline_y >= -1.0,
+                    "glyph '{}' at {:.0}pt: baseline_y={} is above cell",
+                    c,
+                    font_size,
+                    baseline_y
+                );
+                assert!(
+                    baseline_y + gh <= m.cell_height + 1.0,
+                    "glyph '{}' at {:.0}pt: bottom={} exceeds cell_height={}",
+                    c,
+                    font_size,
+                    baseline_y + gh,
+                    m.cell_height
+                );
+            }
+
+            // Korean from fallback
+            if !font.fallbacks.is_empty() {
+                let (gm, _) = font.rasterize('가');
+                eprintln!(
+                    "  '가': w={:2} h={:2} xmin={:3} ymin={:3} has_glyph={}",
+                    gm.width,
+                    gm.height,
+                    gm.xmin,
+                    gm.ymin,
+                    font.font.has_glyph('가')
+                );
+            }
+        }
     }
 
     #[test]
@@ -266,8 +270,13 @@ mod tests {
             return;
         }
         let (m, bmp) = font.rasterize('가');
-        eprintln!("Korean '가' via fallback: w={}, h={}", m.width, m.height);
-        // Should have non-zero bitmap (not .notdef)
+        // Primary font (CascadiaMono) lacks Korean glyphs, so has_glyph()
+        // should route to fallback (Malgun Gothic) which produces larger glyphs.
+        assert!(
+            m.width > 10,
+            "Korean glyph should come from fallback font (width > 10), got {}",
+            m.width
+        );
         assert!(
             bmp.iter().any(|&b| b > 0),
             "Korean glyph should render via fallback"

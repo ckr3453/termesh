@@ -429,11 +429,11 @@ impl Renderer {
     /// Render multiple grid snapshots at different screen positions.
     ///
     /// Each entry is (grid, x_offset, y_offset) in pixel coordinates.
-    /// `dividers` is a list of (x, y, length, is_vertical) for pane borders.
+    /// `dividers` is a list of (x, y, length, is_vertical, color) for pane borders.
     pub fn render_grids(
         &mut self,
         grids: &[(&GridSnapshot, f32, f32)],
-        dividers: &[(f32, f32, f32, bool)],
+        dividers: &[(f32, f32, f32, bool, [f32; 4])],
     ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&Default::default());
@@ -470,13 +470,26 @@ impl Renderer {
             }
 
             for cell in &grid.cells {
-                let x = x_offset + cell.col as f32 * metrics.cell_width;
-                let y = y_offset + cell.row as f32 * metrics.cell_height;
-                let cell_w = if cell.wide {
-                    metrics.cell_width * 2.0
-                } else {
-                    metrics.cell_width
-                };
+                // Skip spacer cells (placeholder after wide characters).
+                // The wide char itself covers 2 cell widths, so the spacer
+                // should not render its own background or glyph.
+                if cell.spacer {
+                    continue;
+                }
+
+                let x = (x_offset + cell.col as f32 * metrics.cell_width).floor();
+                let y = (y_offset + cell.row as f32 * metrics.cell_height).floor();
+                // Pixel-snapped cell size for backgrounds (avoids sub-pixel gaps).
+                let stride = if cell.wide { 2 } else { 1 };
+                let next_x = (x_offset + (cell.col + stride) as f32 * metrics.cell_width).floor();
+                let next_y = (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
+                let bg_w = next_x - x;
+                let bg_h = next_y - y;
+                // Consistent (non-snapped) cell size for glyph positioning.
+                // Using fractional metrics keeps glyphs at uniform offsets
+                // across all columns, preventing wavy text.
+                let glyph_cell_w = metrics.cell_width * stride as f32;
+                let glyph_cell_h = metrics.cell_height;
 
                 // Check if this cell is within the selection range
                 let selected = grid.selection.is_some_and(|sel| {
@@ -504,7 +517,7 @@ impl Renderer {
 
                 bg_instances.push(CellInstance {
                     cell_pos: [x, y],
-                    cell_size: [cell_w, metrics.cell_height],
+                    cell_size: [bg_w, bg_h],
                     fg_color: fg,
                     bg_color: bg,
                     uv_offset: [0.0, 0.0],
@@ -518,12 +531,51 @@ impl Renderer {
                 if cell.c != ' ' && cell.c != '\0' {
                     if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
                         if glyph.width > 0 && glyph.height > 0 {
-                            let glyph_x = glyph.bearing_x;
-                            let glyph_y = metrics.baseline - glyph.bearing_y - glyph.height as f32;
+                            let gw = glyph.width as f32;
+                            let gh = glyph.height as f32;
+
+                            // Log first occurrence of non-ASCII chars for debugging
+                            if cell.c as u32 > 127 && self.frame_count < 5 {
+                                log::info!(
+                                    "GLYPH '{}' u+{:04X}: glyph={}x{} wide={} spacer={} \
+                                     cell_w={:.1} cell_h={:.1} bg={}x{} primary={}",
+                                    cell.c,
+                                    cell.c as u32,
+                                    glyph.width,
+                                    glyph.height,
+                                    cell.wide,
+                                    cell.spacer,
+                                    glyph_cell_w,
+                                    glyph_cell_h,
+                                    bg_w,
+                                    bg_h,
+                                    self.font.font.has_glyph(cell.c),
+                                );
+                            }
+
+                            // Clamp oversized glyphs (CJK/emoji from fallback fonts)
+                            let scale = (glyph_cell_w / gw).min(glyph_cell_h / gh).min(1.0);
+                            let gw = gw * scale;
+                            let gh = gh * scale;
+
+                            // Primary font glyphs: baseline-aligned positioning
+                            // Fallback font glyphs: center-aligned (different
+                            // baseline metrics make cross-font baseline unreliable)
+                            let from_primary = self.font.font.has_glyph(cell.c);
+                            let (glyph_x, glyph_y) = if from_primary && scale >= 1.0 {
+                                let gx = glyph.bearing_x.round();
+                                let glyph_top = glyph.bearing_y + gh;
+                                let gy = (metrics.baseline - glyph_top).round();
+                                (gx, gy)
+                            } else {
+                                let gx = ((glyph_cell_w - gw) / 2.0).round();
+                                let gy = ((glyph_cell_h - gh) / 2.0).round();
+                                (gx, gy)
+                            };
 
                             glyph_instances.push(CellInstance {
                                 cell_pos: [x, y],
-                                cell_size: [metrics.cell_width, metrics.cell_height],
+                                cell_size: [bg_w, bg_h],
                                 fg_color: fg,
                                 bg_color: bg,
                                 uv_offset: [
@@ -535,7 +587,7 @@ impl Renderer {
                                     glyph.height as f32 / atlas_h,
                                 ],
                                 glyph_offset: [glyph_x, glyph_y],
-                                glyph_size: [glyph.width as f32, glyph.height as f32],
+                                glyph_size: [gw, gh],
                                 has_glyph: 1.0,
                                 _padding: 0.0,
                             });
@@ -649,11 +701,10 @@ impl Renderer {
 
             // Pass 4: pane dividers
             if !dividers.is_empty() {
-                let border_color = [0.4, 0.4, 0.4, 1.0];
                 let thickness = 1.0_f32;
                 let divider_instances: Vec<CellInstance> = dividers
                     .iter()
-                    .map(|&(x, y, length, is_vertical)| {
+                    .map(|&(x, y, length, is_vertical, color)| {
                         let (w, h) = if is_vertical {
                             (thickness, length)
                         } else {
@@ -662,8 +713,8 @@ impl Renderer {
                         CellInstance {
                             cell_pos: [x, y],
                             cell_size: [w, h],
-                            fg_color: border_color,
-                            bg_color: border_color,
+                            fg_color: color,
+                            bg_color: color,
                             uv_offset: [0.0, 0.0],
                             uv_size: [0.0, 0.0],
                             glyph_offset: [0.0, 0.0],

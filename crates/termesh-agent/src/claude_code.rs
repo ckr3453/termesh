@@ -20,24 +20,29 @@ struct StatePatterns {
     waiting_for_input: Regex,
     error: Regex,
     success: Regex,
+    /// Claude Code idle prompt — indicates agent is ready for input.
+    idle_prompt: Regex,
 }
 
 impl StatePatterns {
     fn compile() -> Self {
         Self {
-            // Anchored to line start to avoid matching mid-line occurrences.
-            thinking: Regex::new(r"(?i)^(⏳|>\s*(thinking|analyzing|reading|searching))")
+            // Claude Code uses spinner chars (✶✻✽✢·*) followed by "Working…"
+            // or "(thinking)" during active processing.
+            thinking: Regex::new(r"(?i)(\(thinking\)|[✶✻✽✢·\*]\s*Working)")
                 .expect("invalid thinking regex"),
+            // File write indicators from Claude Code output.
             writing_code: Regex::new(
-                r"(?i)^(writing to |creating |updating |edit(ing|ed) |wrote )",
+                r"(?i)^(Writing to |Creating |Updating |Edit(ing|ed) |Wrote )",
             )
             .expect("invalid writing_code regex"),
             // "Running:" and "Executing:" are Claude Code prefixes.
-            // "$" prompt only at line start.
-            running_command: Regex::new(r"(?i)^(running: |executing: |\$\s+\S)")
+            // Also match "$ " prompt at line start.
+            running_command: Regex::new(r"(?i)^(Running: |Executing: |\$\s+\S)")
                 .expect("invalid running_command regex"),
+            // Claude Code permission prompts and user input requests.
             waiting_for_input: Regex::new(
-                r"(?i)(would you like|do you want|\by/n\b|\[Y/n\]|\[y/N\])",
+                r"(?i)(would you like|do you want|\by/n\b|\[Y/n\]|\[y/N\]|Allow |Deny )",
             )
             .expect("invalid waiting_for_input regex"),
             // Anchored: "Error:" or "Failed:" at line start, or marker symbols.
@@ -45,6 +50,8 @@ impl StatePatterns {
             // Only match Unicode checkmarks, or "successfully" as a word.
             // Avoid bare "done" and "complete" which are too common.
             success: Regex::new(r"(✓|✅|\bsuccessfully\b)").expect("invalid success regex"),
+            // Claude Code shows "❯" alone when ready for user input.
+            idle_prompt: Regex::new(r"^❯\s*$").expect("invalid idle_prompt regex"),
         }
     }
 }
@@ -104,6 +111,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if self.patterns.thinking.is_match(trimmed) {
             return Some(AgentState::Thinking);
         }
+        if self.patterns.idle_prompt.is_match(trimmed) {
+            return Some(AgentState::Idle);
+        }
         None
     }
 
@@ -132,27 +142,32 @@ mod tests {
     #[test]
     fn test_thinking_patterns() {
         let a = adapter();
-        assert_eq!(a.analyze_line("⏳ Thinking..."), Some(AgentState::Thinking));
+        // Claude Code spinner + Working patterns
+        assert_eq!(a.analyze_line("✶ Working…"), Some(AgentState::Thinking));
+        assert_eq!(a.analyze_line("✻ Working…"), Some(AgentState::Thinking));
         assert_eq!(
-            a.analyze_line("> Analyzing the codebase"),
+            a.analyze_line("* Working… (thought for 1s)"),
             Some(AgentState::Thinking)
         );
-        assert_eq!(
-            a.analyze_line("> Reading src/main.rs"),
-            Some(AgentState::Thinking)
-        );
-        assert_eq!(
-            a.analyze_line("> Searching for files"),
-            Some(AgentState::Thinking)
-        );
+        assert_eq!(a.analyze_line("(thinking)"), Some(AgentState::Thinking));
+        assert_eq!(a.analyze_line("✢(thinking)"), Some(AgentState::Thinking));
     }
 
     #[test]
     fn test_thinking_no_false_positive() {
         let a = adapter();
-        // Mid-line "reading" or "searching" should NOT match
+        // Normal text should NOT match
         assert_eq!(a.analyze_line("I was reading the docs"), None);
-        assert_eq!(a.analyze_line("Already searching..."), None);
+        assert_eq!(a.analyze_line("hello world"), None);
+    }
+
+    #[test]
+    fn test_idle_prompt() {
+        let a = adapter();
+        assert_eq!(a.analyze_line("❯"), Some(AgentState::Idle));
+        assert_eq!(a.analyze_line("❯ "), Some(AgentState::Idle));
+        // Prompt with text is user typing, not idle
+        assert_eq!(a.analyze_line("❯ hello"), None);
     }
 
     #[test]
@@ -267,7 +282,7 @@ mod tests {
     #[test]
     fn test_error_takes_priority_over_thinking() {
         let a = adapter();
-        let state = a.analyze_line("Error: analyzing failed");
+        let state = a.analyze_line("Error: working failed");
         assert_eq!(state, Some(AgentState::Error));
     }
 
@@ -290,7 +305,7 @@ mod tests {
     #[test]
     fn test_analyze_multi_line_output() {
         let a = adapter();
-        let output = "⏳ Thinking...\nWriting to src/lib.rs\n✓ Done";
+        let output = "✶ Working…\nWriting to src/lib.rs\n✓ Done";
         let state = a.analyze_output(output);
         assert_eq!(state, Some(AgentState::Success));
     }

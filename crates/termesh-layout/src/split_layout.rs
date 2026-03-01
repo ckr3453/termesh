@@ -73,6 +73,11 @@ impl SplitLayoutManager {
         self.layout.focus_prev();
     }
 
+    /// Focus a pane by index (0-based).
+    pub fn focus_index(&mut self, index: usize) {
+        self.layout.focus_index(index);
+    }
+
     /// Focus a pane by ID.
     pub fn focus_pane(&mut self, id: PaneId) {
         self.layout.focus_pane(id);

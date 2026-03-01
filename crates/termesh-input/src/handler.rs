@@ -148,13 +148,27 @@ fn parse_action(s: &str) -> Option<Action> {
         "splitvertical" => Some(Action::SplitVertical),
         "closepane" => Some(Action::ClosePane),
         "togglesidepanel" => Some(Action::ToggleSidePanel),
-        "navigateleft" => Some(Action::NavigateLeft),
-        "navigatedown" => Some(Action::NavigateDown),
-        "navigateup" => Some(Action::NavigateUp),
-        "navigateright" => Some(Action::NavigateRight),
+        "focuspane1" => Some(Action::FocusPane1),
+        "focuspane2" => Some(Action::FocusPane2),
+        "focuspane3" => Some(Action::FocusPane3),
+        "focuspane4" => Some(Action::FocusPane4),
+        "focuspane5" => Some(Action::FocusPane5),
+        "focuspane6" => Some(Action::FocusPane6),
+        "focuspane7" => Some(Action::FocusPane7),
+        "focuspane8" => Some(Action::FocusPane8),
+        "focuspane9" => Some(Action::FocusPane9),
         "togglemode" => Some(Action::ToggleMode),
         "focusnext" => Some(Action::FocusNext),
         "focusprev" => Some(Action::FocusPrev),
+        "spawnsession" => Some(Action::SpawnSession),
+        "renamesession" => Some(Action::RenameSession),
+        "copy" => Some(Action::Copy),
+        "paste" => Some(Action::Paste),
+        "togglesessionlist" => Some(Action::ToggleSessionList),
+        "sidepanelscrollup" => Some(Action::SidePanelScrollUp),
+        "sidepanelscrolldown" => Some(Action::SidePanelScrollDown),
+        "sidepanelnexttab" => Some(Action::SidePanelNextTab),
+        "sidepanelprevtab" => Some(Action::SidePanelPrevTab),
         _ => None,
     }
 }
@@ -170,16 +184,16 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_key_cmd_t() {
+    fn test_handle_key_primary_t() {
         let handler = InputHandler::new();
-        let action = handler.handle_key(Modifiers::LOGO, Key::Char('t'));
+        let action = handler.handle_key(Keymap::PRIMARY, Key::Char('t'));
         assert_eq!(action, Some(Action::SplitHorizontal));
     }
 
     #[test]
-    fn test_handle_key_cmd_w() {
+    fn test_handle_key_primary_w() {
         let handler = InputHandler::new();
-        let action = handler.handle_key(Modifiers::LOGO, Key::Char('w'));
+        let action = handler.handle_key(Keymap::PRIMARY, Key::Char('w'));
         assert_eq!(action, Some(Action::ClosePane));
     }
 
@@ -241,7 +255,7 @@ action = "ClosePane"
         handler.load_config_str(toml).unwrap();
 
         // Default binding should still work
-        let action = handler.handle_key(Modifiers::LOGO, Key::Char('t'));
+        let action = handler.handle_key(Keymap::PRIMARY, Key::Char('t'));
         assert_eq!(action, Some(Action::SplitHorizontal));
     }
 
@@ -286,13 +300,42 @@ action = "ClosePane"
             parse_action("ToggleSidePanel"),
             Some(Action::ToggleSidePanel)
         );
-        assert_eq!(parse_action("NavigateLeft"), Some(Action::NavigateLeft));
-        assert_eq!(parse_action("NavigateDown"), Some(Action::NavigateDown));
-        assert_eq!(parse_action("NavigateUp"), Some(Action::NavigateUp));
-        assert_eq!(parse_action("NavigateRight"), Some(Action::NavigateRight));
+        assert_eq!(parse_action("FocusPane1"), Some(Action::FocusPane1));
+        assert_eq!(parse_action("FocusPane2"), Some(Action::FocusPane2));
+        assert_eq!(parse_action("FocusPane3"), Some(Action::FocusPane3));
+        assert_eq!(parse_action("FocusPane4"), Some(Action::FocusPane4));
+        assert_eq!(parse_action("FocusPane5"), Some(Action::FocusPane5));
+        assert_eq!(parse_action("FocusPane6"), Some(Action::FocusPane6));
+        assert_eq!(parse_action("FocusPane7"), Some(Action::FocusPane7));
+        assert_eq!(parse_action("FocusPane8"), Some(Action::FocusPane8));
+        assert_eq!(parse_action("FocusPane9"), Some(Action::FocusPane9));
         assert_eq!(parse_action("ToggleMode"), Some(Action::ToggleMode));
         assert_eq!(parse_action("FocusNext"), Some(Action::FocusNext));
         assert_eq!(parse_action("FocusPrev"), Some(Action::FocusPrev));
+        assert_eq!(parse_action("SpawnSession"), Some(Action::SpawnSession));
+        assert_eq!(parse_action("RenameSession"), Some(Action::RenameSession));
+        assert_eq!(parse_action("Copy"), Some(Action::Copy));
+        assert_eq!(parse_action("Paste"), Some(Action::Paste));
+        assert_eq!(
+            parse_action("ToggleSessionList"),
+            Some(Action::ToggleSessionList)
+        );
+        assert_eq!(
+            parse_action("SidePanelScrollUp"),
+            Some(Action::SidePanelScrollUp)
+        );
+        assert_eq!(
+            parse_action("SidePanelScrollDown"),
+            Some(Action::SidePanelScrollDown)
+        );
+        assert_eq!(
+            parse_action("SidePanelNextTab"),
+            Some(Action::SidePanelNextTab)
+        );
+        assert_eq!(
+            parse_action("SidePanelPrevTab"),
+            Some(Action::SidePanelPrevTab)
+        );
         assert_eq!(parse_action("Unknown"), None);
     }
 

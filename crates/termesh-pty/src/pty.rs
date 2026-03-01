@@ -49,7 +49,7 @@ impl PtyResizer {
 /// Wraps a portable-pty master/child pair.
 pub struct Pty {
     master: Arc<std::sync::Mutex<Box<dyn MasterPty + Send>>>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Option<Box<dyn Child + Send + Sync>>,
     reader: Box<dyn Read + Send>,
     writer: Option<Box<dyn Write + Send>>,
 }
@@ -93,6 +93,21 @@ impl Pty {
             cmd.cwd(dir);
         }
 
+        // Mark child processes as running inside termesh to prevent nested
+        // termesh instances (screen-within-screen).
+        cmd.env("TERMESH", "1");
+
+        // Remove environment variables that prevent nested CLI agent sessions.
+        // Claude Code sets these to detect nesting; termesh spawns agents as
+        // independent PTY sessions, so they must be cleared.
+        for var in &[
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+        ] {
+            cmd.env_remove(var);
+        }
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -116,7 +131,7 @@ impl Pty {
 
         Ok(Self {
             master: Arc::new(std::sync::Mutex::new(pair.master)),
-            child,
+            child: Some(child),
             reader,
             writer: Some(writer),
         })
@@ -176,18 +191,31 @@ impl Pty {
     ///
     /// Returns `Some(exit_code)` if exited, `None` if still running.
     pub fn try_wait(&mut self) -> Result<Option<u32>, PtyError> {
-        match self.child.try_wait() {
-            Ok(Some(status)) => Ok(Some(status.exit_code())),
-            Ok(None) => Ok(None),
-            Err(e) => Err(PtyError::Io(std::io::Error::other(e))),
+        match &mut self.child {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Ok(Some(status.exit_code())),
+                Ok(None) => Ok(None),
+                Err(e) => Err(PtyError::Io(std::io::Error::other(e))),
+            },
+            None => Ok(None),
         }
+    }
+
+    /// Take the child handle, separating it from the PTY.
+    ///
+    /// Used to monitor child exit from a separate thread.
+    pub fn take_child(&mut self) -> Option<Box<dyn Child + Send + Sync>> {
+        self.child.take()
     }
 
     /// Kill the child process.
     pub fn kill(&mut self) -> Result<(), PtyError> {
-        self.child
-            .kill()
-            .map_err(|e| PtyError::Io(std::io::Error::other(e)))
+        match &mut self.child {
+            Some(child) => child
+                .kill()
+                .map_err(|e| PtyError::Io(std::io::Error::other(e))),
+            None => Ok(()),
+        }
     }
 }
 

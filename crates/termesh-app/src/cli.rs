@@ -6,6 +6,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "termesh", version, about)]
 pub struct Cli {
+    /// Start directly with a specific agent (claude, codex, gemini, shell).
+    #[arg(long)]
+    pub agent: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -38,6 +42,13 @@ mod tests {
             Some(Command::Open { name }) => assert_eq!(name, "fullstack"),
             _ => panic!("expected Open command"),
         }
+    }
+
+    #[test]
+    fn test_parse_agent_flag() {
+        let cli = Cli::parse_from(["termesh", "--agent", "claude"]);
+        assert_eq!(cli.agent.as_deref(), Some("claude"));
+        assert!(cli.command.is_none());
     }
 
     #[test]

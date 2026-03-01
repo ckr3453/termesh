@@ -152,15 +152,42 @@ impl Session {
         let (tx, rx) = mpsc::channel(256);
         let id = self.id;
 
+        // Take child handle for exit monitoring in a separate thread.
+        // On Windows, conpty read_output() can block indefinitely even after
+        // the child process exits, so we need an independent exit watcher.
+        let mut child = self.pty.take_child();
+        let child_exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited_flag = child_exited.clone();
+        let exit_tx = tx.clone();
+
+        std::thread::Builder::new()
+            .name(format!("pty-watcher-{id}"))
+            .spawn(move || {
+                if let Some(ref mut child) = child {
+                    // Blocking wait for child exit
+                    match child.wait() {
+                        Ok(status) => {
+                            exited_flag.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = exit_tx
+                                .blocking_send(SessionOutput::Exited(Some(status.exit_code())));
+                        }
+                        Err(_) => {
+                            exited_flag.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = exit_tx.blocking_send(SessionOutput::Exited(None));
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn PTY watcher thread");
+
         let join = std::thread::Builder::new()
-            .name(format!("pty-reader-{}", id))
+            .name(format!("pty-reader-{id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
                 loop {
                     match self.pty.read_output(&mut buf) {
                         Ok(0) => {
-                            let exit_code = self.pty.try_wait().ok().flatten();
-                            let _ = tx.blocking_send(SessionOutput::Exited(exit_code));
+                            // EOF — child likely exited; watcher will send Exited
                             break;
                         }
                         Ok(n) => {
@@ -170,10 +197,13 @@ impl Session {
                             {
                                 break; // Receiver dropped
                             }
+                            // After forwarding data, check if child exited
+                            if child_exited.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
                         }
                         Err(_) => {
-                            let exit_code = self.pty.try_wait().ok().flatten();
-                            let _ = tx.blocking_send(SessionOutput::Exited(exit_code));
+                            // Read error — child likely exited; watcher will send Exited
                             break;
                         }
                     }

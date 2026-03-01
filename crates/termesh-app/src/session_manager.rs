@@ -12,6 +12,44 @@ use tokio::sync::mpsc;
 /// Default terminal scrollback lines.
 const DEFAULT_SCROLLBACK: usize = 10_000;
 
+/// Strip ANSI escape sequences from text for agent state analysis.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ ... final_byte
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // Consume until a letter (@ through ~) is found
+                for c2 in chars.by_ref() {
+                    if c2.is_ascii_alphabetic() || c2 == '~' || c2 == '@' {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                // OSC sequence: ESC ] ... ST (ESC \ or BEL)
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2 == '\x07' {
+                        break;
+                    }
+                    if c2 == '\x1b' {
+                        chars.next(); // consume '\'
+                        break;
+                    }
+                }
+            } else {
+                // Other ESC sequence: skip next char
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A PTY session paired with its terminal emulator.
 struct ManagedSession {
     /// Writer handle for sending input to the PTY.
@@ -65,6 +103,8 @@ impl SessionManager {
         let rows = config.rows;
         let cols = config.cols;
         let command = config.command.clone();
+        let agent_hint = config.agent.clone();
+        let config_name = config.name.clone();
 
         let mut session = Session::spawn(config)?;
         let id = session.id;
@@ -93,13 +133,29 @@ impl SessionManager {
             }
         });
 
-        // Detect if the spawn command is an agent
-        let adapter_id = self.registry.detect_agent(&command).map(|s| s.to_string());
+        // Detect if this session is an agent.
+        // Prefer the config.agent hint (handles Windows cmd.exe wrapping),
+        // fall back to command-based detection.
+        let adapter_id = if agent_hint != "none" {
+            // Try config.agent as adapter id first, then config.name
+            self.registry
+                .get(&agent_hint)
+                .map(|_| agent_hint.clone())
+                .or_else(|| {
+                    self.registry
+                        .detect_agent(&config_name)
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| self.registry.detect_agent(&command).map(|s| s.to_string()))
+        } else {
+            self.registry.detect_agent(&command).map(|s| s.to_string())
+        };
         let agent_state = if adapter_id.is_some() {
             AgentState::Idle
         } else {
             AgentState::None
         };
+        log::info!("session {id}: command={command:?}, agent={agent_hint}, adapter={adapter_id:?}");
 
         self.sessions.insert(
             id,
@@ -151,9 +207,13 @@ impl SessionManager {
     }
 
     /// Send input to the active session's PTY.
+    ///
+    /// Automatically scrolls the viewport to the bottom so the user
+    /// sees the latest output after typing.
     pub fn write_active(&mut self, data: &[u8]) -> Result<(), PtyError> {
         if let Some(id) = self.active {
             if let Some(session) = self.sessions.get_mut(&id) {
+                session.terminal.scroll_to_bottom();
                 session.writer.write(data)?;
                 return Ok(());
             }
@@ -162,8 +222,11 @@ impl SessionManager {
     }
 
     /// Send input to a specific session's PTY.
+    ///
+    /// Automatically scrolls the viewport to the bottom.
     pub fn write_to(&mut self, id: SessionId, data: &[u8]) -> Result<(), PtyError> {
         if let Some(session) = self.sessions.get_mut(&id) {
+            session.terminal.scroll_to_bottom();
             session.writer.write(data)?;
         }
         Ok(())
@@ -171,9 +234,8 @@ impl SessionManager {
 
     /// Process pending session output — feed PTY data into terminals.
     ///
-    /// Returns the number of events processed.
-    pub fn process_events(&mut self) -> usize {
-        let mut count = 0;
+    /// Returns the IDs of sessions that exited during this tick.
+    pub fn process_events(&mut self) -> Vec<SessionId> {
         let mut exited = Vec::new();
         // Collect adapter analysis results: (session_id, adapter_id, data_text)
         let mut analyze_queue: Vec<(SessionId, String, String)> = Vec::new();
@@ -194,23 +256,29 @@ impl SessionManager {
                                 ));
                             }
                         }
-                        count += 1;
                     }
                 }
                 SessionOutput::Exited(_code) => {
                     exited.push(event.session_id);
-                    count += 1;
                 }
             }
         }
 
-        // Apply agent state analysis
-        for (session_id, adapter_id, text) in analyze_queue {
+        // Apply agent state analysis (strip ANSI escapes first)
+        for (session_id, adapter_id, raw_text) in analyze_queue {
+            let text = strip_ansi(&raw_text);
+            // Log non-empty stripped text for pattern debugging
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && trimmed.len() > 1 {
+                    log::debug!("agent-pty [{session_id}]: {trimmed:?}");
+                }
+            }
             if let Some(adapter) = self.registry.get(&adapter_id) {
                 if let Some(new_state) = adapter.analyze_output(&text) {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
                         if session.agent_state != new_state {
-                            log::debug!(
+                            log::info!(
                                 "session {session_id}: agent state {:?} → {new_state:?}",
                                 session.agent_state
                             );
@@ -221,11 +289,12 @@ impl SessionManager {
             }
         }
 
-        for id in exited {
+        for &id in &exited {
+            log::info!("session {id} exited, removing");
             self.remove(id);
         }
 
-        count
+        exited
     }
 
     /// Resize a session's terminal and notify the PTY.
@@ -277,6 +346,14 @@ impl SessionManager {
             .get(&id)
             .map(|s| s.adapter_id.is_some())
             .unwrap_or(false)
+    }
+
+    /// Get the agent kind (adapter_id) for a session, or "shell" if none.
+    pub fn agent_kind(&self, id: SessionId) -> &str {
+        self.sessions
+            .get(&id)
+            .and_then(|s| s.adapter_id.as_deref())
+            .unwrap_or("shell")
     }
 }
 
@@ -389,16 +466,15 @@ mod tests {
         #[cfg(not(windows))]
         mgr.write_active(b"echo hello\n").unwrap();
 
-        // Wait for output
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Process events should feed data into terminal
-        let count = mgr.process_events();
-        assert!(count > 0, "expected PTY output events");
-
-        // Terminal should have content
-        let grid = mgr.terminal(id).unwrap().render_grid();
-        let has_content = grid.cells.iter().any(|c| c.c != ' ' && c.c != '\0');
-        assert!(has_content, "terminal should have rendered content");
+        // Wait for output (cmd.exe can be slow on Windows)
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _exited = mgr.process_events();
+            let grid = mgr.terminal(id).unwrap().render_grid();
+            if grid.cells.iter().any(|c| c.c != ' ' && c.c != '\0') {
+                return; // success
+            }
+        }
+        panic!("terminal should have rendered content after 2s");
     }
 }

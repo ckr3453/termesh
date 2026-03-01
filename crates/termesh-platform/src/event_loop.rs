@@ -30,8 +30,8 @@ pub trait AppCallbacks {
     fn on_tick(&mut self) -> Vec<(termesh_terminal::grid::GridSnapshot, f32, f32)>;
 
     /// Returns divider lines for pane borders.
-    /// Each entry is (x, y, length, is_vertical, is_active).
-    fn dividers(&self) -> Vec<(f32, f32, f32, bool)>;
+    /// Each entry is (x, y, length, is_vertical, color_rgba).
+    fn dividers(&self) -> Vec<(f32, f32, f32, bool, [f32; 4])>;
 
     /// Called when the window is resized.
     /// `rows`/`cols` are grid dimensions, `width`/`height` are pixel dimensions.
@@ -205,6 +205,14 @@ impl ApplicationHandler for App {
         // Scale font size by DPI factor for crisp rendering on HiDPI displays
         let scale_factor = window.scale_factor() as f32;
         let physical_font_size = self.config.font_size * scale_factor;
+        log::info!(
+            "DPI: scale_factor={:.2}, font={:.1}→{:.1}pt, window={}x{}",
+            scale_factor,
+            self.config.font_size,
+            physical_font_size,
+            width,
+            height
+        );
 
         // Initialize renderer
         let renderer = pollster::block_on(Renderer::new(
@@ -229,6 +237,7 @@ impl ApplicationHandler for App {
             }
         }
 
+        window.set_ime_allowed(true);
         self.window = Some(window);
         self.request_redraw();
     }
@@ -324,9 +333,22 @@ impl ApplicationHandler for App {
                 let modifiers = input_bridge::convert_modifiers(&self.current_modifiers);
                 let has_modifier = modifiers.ctrl || modifiers.alt || modifiers.logo;
 
+                log::debug!(
+                    "KEY: {:?} phys={:?} has_mod={} mods={:?}",
+                    event.logical_key,
+                    event.physical_key,
+                    has_modifier,
+                    modifiers
+                );
+
                 if has_modifier {
-                    if let Some(key) = input_bridge::convert_key(&event.logical_key) {
-                        if let Some(action) = self.config.input_handler.handle_key(modifiers, key) {
+                    // Try logical key first, fall back to physical key
+                    let key = input_bridge::convert_key(&event.logical_key)
+                        .or_else(|| input_bridge::convert_physical_key(&event.physical_key));
+                    if let Some(key) = key {
+                        let action = self.config.input_handler.handle_key(modifiers, key);
+                        if let Some(action) = action {
+                            log::info!("keybinding matched → {action:?}");
                             self.dispatch_action(action);
                             return;
                         }
@@ -442,6 +464,20 @@ impl ApplicationHandler for App {
                     }
                     self.request_redraw();
                 }
+            }
+
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                let bytes = text.as_bytes().to_vec();
+                if let Some(cb) = &mut self.callbacks {
+                    cb.on_input(&bytes);
+                } else if let Some(terminal) = &mut self.terminal {
+                    terminal.feed_bytes(&bytes);
+                }
+                self.request_redraw();
+            }
+
+            WindowEvent::Ime(_) => {
+                // Preedit and other IME events are ignored for now
             }
 
             _ => {}

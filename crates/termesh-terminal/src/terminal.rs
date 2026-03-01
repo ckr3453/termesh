@@ -4,6 +4,7 @@ use crate::grid::{build_renderable_cell, CursorState, GridSnapshot, SelectionRan
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte;
 
@@ -135,29 +136,47 @@ impl Terminal {
     /// Take a snapshot of the current grid for rendering.
     ///
     /// Returns a `GridSnapshot` with all renderable cells and cursor state.
+    /// When the viewport is scrolled (display_offset > 0), cells are read
+    /// from the scrollback history region using negative line indices.
     pub fn render_grid(&self) -> GridSnapshot {
         let grid = self.term.grid();
         let cols = grid.columns();
         let rows = grid.screen_lines();
+        let display_offset = grid.display_offset();
 
         let mut cells = Vec::with_capacity(rows * cols);
 
         for row_idx in 0..rows {
+            // Apply display_offset: shift line index into scrollback history.
+            // display_offset=0 → Line(0..rows) (current screen)
+            // display_offset=N → Line(-N .. rows-N) (scrolled up N lines)
+            let line = Line(row_idx as i32 - display_offset as i32);
             for col_idx in 0..cols {
-                let point = Point::new(Line(row_idx as i32), Column(col_idx));
+                let point = Point::new(line, Column(col_idx));
                 let cell = &grid[point];
 
-                let renderable =
+                let is_spacer = cell.flags.contains(CellFlags::WIDE_CHAR_SPACER);
+                let mut renderable =
                     build_renderable_cell(row_idx, col_idx, cell.c, &cell.fg, &cell.bg, cell.flags);
+                renderable.spacer = is_spacer;
                 cells.push(renderable);
             }
         }
 
         let cursor_point = self.term.grid().cursor.point;
-        let cursor = CursorState {
-            row: cursor_point.line.0 as usize,
-            col: cursor_point.column.0,
-            visible: true,
+        // Adjust cursor position for display offset. Hide cursor when scrolled.
+        let cursor = if display_offset == 0 {
+            CursorState {
+                row: cursor_point.line.0 as usize,
+                col: cursor_point.column.0,
+                visible: true,
+            }
+        } else {
+            CursorState {
+                row: 0,
+                col: 0,
+                visible: false,
+            }
         };
 
         let selection = self.selection_range();
@@ -525,5 +544,47 @@ mod tests {
         term.selection_update(2, 7);
         let grid = term.render_grid();
         assert!(grid.selection.is_some());
+    }
+
+    #[test]
+    fn test_scroll_up_shows_history() {
+        // Use a small terminal (4 rows) so scrollback is triggered quickly.
+        let mut term = Terminal::new(4, 20, 100);
+        // Write enough lines to push content into scrollback.
+        for i in 0..10 {
+            term.feed_bytes(format!("line-{i}\r\n").as_bytes());
+        }
+
+        // Before scrolling: bottom of output should be visible.
+        let grid = term.render_grid();
+        assert!(grid.cursor.visible);
+
+        // Scroll up to see earlier lines.
+        term.scroll_up(6);
+
+        let grid = term.render_grid();
+        // Cursor should be hidden when scrolled.
+        assert!(!grid.cursor.visible);
+
+        // First visible row should contain earlier content (not the latest).
+        let first_row: String = (0..6).map(|col| grid.cell_at(0, col).unwrap().c).collect();
+        assert!(
+            first_row.starts_with("line-"),
+            "expected scrollback content, got: {first_row:?}"
+        );
+    }
+
+    #[test]
+    fn test_scroll_to_bottom_restores_view() {
+        let mut term = Terminal::new(4, 20, 100);
+        for i in 0..10 {
+            term.feed_bytes(format!("line-{i}\r\n").as_bytes());
+        }
+
+        term.scroll_up(5);
+        assert!(!term.render_grid().cursor.visible);
+
+        term.scroll_to_bottom();
+        assert!(term.render_grid().cursor.visible);
     }
 }

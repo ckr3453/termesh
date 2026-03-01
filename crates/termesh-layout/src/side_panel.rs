@@ -14,15 +14,11 @@ pub struct SidePanel {
 }
 
 impl SidePanel {
-    /// Create a new side panel with default tabs.
+    /// Create a new side panel with default tabs (Diff only).
     pub fn new() -> Self {
         Self {
             visible: false,
-            tabs: vec![
-                SidePanelTab::Diff,
-                SidePanelTab::Preview,
-                SidePanelTab::TestLog,
-            ],
+            tabs: vec![SidePanelTab::Diff],
             active_tab: 0,
         }
     }
@@ -116,7 +112,7 @@ mod tests {
     #[test]
     fn test_default_tabs() {
         let panel = SidePanel::new();
-        assert_eq!(panel.tabs().len(), 3);
+        assert_eq!(panel.tabs().len(), 1);
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
     }
 
@@ -141,19 +137,25 @@ mod tests {
 
     #[test]
     fn test_next_tab_wraps() {
-        let mut panel = SidePanel::new();
+        let mut panel =
+            SidePanel::with_tabs(vec![SidePanelTab::Diff, SidePanelTab::Preview], false);
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
         panel.next_tab();
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Preview));
-        panel.next_tab();
-        assert_eq!(panel.active_tab(), Some(SidePanelTab::TestLog));
         panel.next_tab();
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
     }
 
     #[test]
     fn test_prev_tab_wraps() {
-        let mut panel = SidePanel::new();
+        let mut panel = SidePanel::with_tabs(
+            vec![
+                SidePanelTab::Diff,
+                SidePanelTab::Preview,
+                SidePanelTab::TestLog,
+            ],
+            false,
+        );
         panel.prev_tab();
         assert_eq!(panel.active_tab(), Some(SidePanelTab::TestLog));
         panel.prev_tab();
@@ -162,7 +164,14 @@ mod tests {
 
     #[test]
     fn test_set_active() {
-        let mut panel = SidePanel::new();
+        let mut panel = SidePanel::with_tabs(
+            vec![
+                SidePanelTab::Diff,
+                SidePanelTab::Preview,
+                SidePanelTab::TestLog,
+            ],
+            false,
+        );
         panel.set_active(SidePanelTab::TestLog);
         assert_eq!(panel.active_index(), 2);
         assert_eq!(panel.active_tab(), Some(SidePanelTab::TestLog));

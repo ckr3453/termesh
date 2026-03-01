@@ -112,12 +112,24 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 }
 
 /// Check if a command is available in PATH.
-#[cfg(windows)]
-fn which(cmd: &str) -> bool {
+pub fn which(cmd: &str) -> bool {
+    let sep = if cfg!(windows) { ';' } else { ':' };
     std::env::var("PATH")
         .unwrap_or_default()
-        .split(';')
-        .any(|dir| std::path::Path::new(dir).join(cmd).exists())
+        .split(sep)
+        .any(|dir| {
+            let base = std::path::Path::new(dir).join(cmd);
+            if base.exists() {
+                return true;
+            }
+            if cfg!(windows) {
+                base.with_extension("exe").exists()
+                    || base.with_extension("cmd").exists()
+                    || base.with_extension("bat").exists()
+            } else {
+                false
+            }
+        })
 }
 
 #[cfg(test)]

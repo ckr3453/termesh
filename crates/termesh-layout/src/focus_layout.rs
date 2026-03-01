@@ -6,13 +6,19 @@ use crate::side_panel::SidePanel;
 use termesh_core::types::SidePanelTab;
 
 /// Default width of the session list panel in pixels.
-const DEFAULT_SESSION_LIST_WIDTH: u32 = 200;
+const DEFAULT_SESSION_LIST_WIDTH: u32 = 180;
 
 /// Default width of the side panel in pixels.
-const DEFAULT_SIDE_PANEL_WIDTH: u32 = 350;
+const DEFAULT_SIDE_PANEL_WIDTH: u32 = 300;
 
 /// Minimum width for the terminal area in pixels.
 const MIN_TERMINAL_WIDTH: u32 = 200;
+
+/// Height reserved for the header bar (in rows).
+pub const HEADER_HEIGHT: u32 = 1;
+
+/// Height reserved for the status bar (in rows).
+pub const STATUS_HEIGHT: u32 = 1;
 
 /// Which region of the Focus mode layout has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +92,11 @@ impl FocusLayout {
         &self.side_panel
     }
 
+    /// Get a mutable reference to the side panel.
+    pub fn side_panel_mut(&mut self) -> &mut SidePanel {
+        &mut self.side_panel
+    }
+
     /// Switch to the next side panel tab.
     pub fn next_side_panel_tab(&mut self) {
         self.side_panel.next_tab();
@@ -102,7 +113,40 @@ impl FocusLayout {
     }
 
     /// Compute layout rectangles for a given screen size.
+    ///
+    /// All regions occupy the full screen height. Use [`compute_regions_with_bars`]
+    /// to reserve space for header and status bars.
     pub fn compute_regions(&self, screen_width: u32, screen_height: u32) -> FocusRegions {
+        self.compute_regions_inner(screen_width, screen_height, 0, 0)
+    }
+
+    /// Compute layout rectangles, reserving pixel space for header and status bars.
+    ///
+    /// `header_px` and `status_px` are the pixel heights of the header/status bars.
+    /// All panels start at y = `header_px` and their height is reduced accordingly.
+    pub fn compute_regions_with_bars(
+        &self,
+        screen_width: u32,
+        screen_height: u32,
+        header_px: u32,
+        status_px: u32,
+    ) -> FocusRegions {
+        self.compute_regions_inner(screen_width, screen_height, header_px, status_px)
+    }
+
+    /// Inner implementation for region computation.
+    fn compute_regions_inner(
+        &self,
+        screen_width: u32,
+        screen_height: u32,
+        header_px: u32,
+        status_px: u32,
+    ) -> FocusRegions {
+        let y_offset = header_px;
+        let usable_height = screen_height
+            .saturating_sub(header_px)
+            .saturating_sub(status_px);
+
         let list_w = self.session_list_width.min(screen_width / 3);
 
         let panel_w = if self.side_panel.is_visible() {
@@ -124,21 +168,21 @@ impl FocusLayout {
         FocusRegions {
             session_list: PixelRect {
                 x: 0,
-                y: 0,
+                y: y_offset,
                 width: list_w,
-                height: screen_height,
+                height: usable_height,
             },
             terminal: PixelRect {
                 x: list_w,
-                y: 0,
+                y: y_offset,
                 width: terminal_w,
-                height: screen_height,
+                height: usable_height,
             },
             side_panel: PixelRect {
                 x: list_w + terminal_w,
-                y: 0,
+                y: y_offset,
                 width: panel_w,
-                height: screen_height,
+                height: usable_height,
             },
         }
     }
@@ -244,11 +288,11 @@ mod tests {
         let regions = layout.compute_regions(1280, 800);
 
         assert_eq!(regions.session_list.x, 0);
-        assert_eq!(regions.session_list.width, 200);
+        assert_eq!(regions.session_list.width, 180);
         assert_eq!(regions.session_list.height, 800);
 
-        assert_eq!(regions.terminal.x, 200);
-        assert_eq!(regions.terminal.width, 1080); // 1280 - 200
+        assert_eq!(regions.terminal.x, 180);
+        assert_eq!(regions.terminal.width, 1100); // 1280 - 180
         assert_eq!(regions.terminal.height, 800);
 
         assert_eq!(regions.side_panel.width, 0);
@@ -261,9 +305,9 @@ mod tests {
 
         let regions = layout.compute_regions(1280, 800);
 
-        assert_eq!(regions.session_list.width, 200);
-        assert_eq!(regions.side_panel.width, 350);
-        assert_eq!(regions.terminal.width, 730); // 1280 - 200 - 350
+        assert_eq!(regions.session_list.width, 180);
+        assert_eq!(regions.side_panel.width, 300);
+        assert_eq!(regions.terminal.width, 800); // 1280 - 180 - 300
         assert_eq!(
             regions.session_list.width + regions.terminal.width + regions.side_panel.width,
             1280

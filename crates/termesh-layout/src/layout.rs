@@ -37,6 +37,11 @@ impl LayoutManager {
         &self.panes
     }
 
+    /// Get mutable access to all panes.
+    pub fn panes_mut(&mut self) -> &mut [Pane] {
+        &mut self.panes
+    }
+
     /// Get the focused pane.
     pub fn focused_pane(&self) -> &Pane {
         debug_assert!(
@@ -105,11 +110,6 @@ impl LayoutManager {
 
         let panes: Vec<(f32, f32, f32, f32)> = match layout {
             SplitLayout::Dual => vec![(0.0, 0.0, 0.5, 1.0), (0.5, 0.0, 0.5, 1.0)],
-            SplitLayout::Triple => vec![
-                (0.0, 0.0, 0.5, 1.0),
-                (0.5, 0.0, 0.5, 0.5),
-                (0.5, 0.5, 0.5, 0.5),
-            ],
             SplitLayout::Quad => vec![
                 (0.0, 0.0, 0.5, 0.5),
                 (0.5, 0.0, 0.5, 0.5),
@@ -232,25 +232,6 @@ mod tests {
         assert_eq!(panes[0].width, 0.5);
         assert_eq!(panes[1].x, 0.5);
         assert_eq!(panes[1].width, 0.5);
-    }
-
-    #[test]
-    fn test_apply_triple_layout() {
-        let mut layout = LayoutManager::new();
-        layout.apply_layout(SplitLayout::Triple);
-
-        assert_eq!(layout.pane_count(), 3);
-
-        let panes = layout.panes();
-        // Left pane: full height
-        assert_eq!(panes[0].width, 0.5);
-        assert_eq!(panes[0].height, 1.0);
-        // Top-right
-        assert_eq!(panes[1].x, 0.5);
-        assert_eq!(panes[1].height, 0.5);
-        // Bottom-right
-        assert_eq!(panes[2].x, 0.5);
-        assert_eq!(panes[2].y, 0.5);
     }
 
     #[test]

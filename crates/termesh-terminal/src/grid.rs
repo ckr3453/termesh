@@ -29,6 +29,8 @@ pub struct RenderableCell {
     pub inverse: bool,
     /// Whether this is a wide character.
     pub wide: bool,
+    /// Whether this cell is a spacer following a wide character.
+    pub spacer: bool,
 }
 
 impl Default for RenderableCell {
@@ -45,6 +47,7 @@ impl Default for RenderableCell {
             strikethrough: false,
             inverse: false,
             wide: false,
+            spacer: false,
         }
     }
 }
@@ -133,6 +136,7 @@ pub(crate) fn build_renderable_cell(
         strikethrough: flags.contains(CellFlags::STRIKEOUT),
         inverse,
         wide: flags.contains(CellFlags::WIDE_CHAR),
+        spacer: false,
     }
 }
 
