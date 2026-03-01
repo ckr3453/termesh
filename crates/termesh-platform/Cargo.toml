@@ -10,7 +10,7 @@ termesh-renderer = { path = "../termesh-renderer" }
 termesh-terminal = { path = "../termesh-terminal" }
 termesh-input = { path = "../termesh-input" }
 winit = "0.30"
-wgpu = "24"
+wgpu = "28"
 pollster = "0.4"
 arboard = "3"
 log = "0.4"
