@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 termesh-core = { path = "../termesh-core" }
 termesh-agent = { path = "../termesh-agent" }
+termesh-diff = { path = "../termesh-diff" }
 termesh-layout = { path = "../termesh-layout" }
 termesh-input = { path = "../termesh-input" }
 termesh-platform = { path = "../termesh-platform" }

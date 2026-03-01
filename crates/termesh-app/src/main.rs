@@ -11,6 +11,7 @@ use session_manager::SessionManager;
 use std::path::PathBuf;
 use termesh_agent::preset::WorkspacePreset;
 use termesh_core::types::{AgentState, SplitLayout, ViewMode};
+use termesh_diff::diff_generator::DiffLine;
 use termesh_input::action::Action;
 use termesh_layout::focus_layout::FocusLayout;
 use termesh_layout::session_list::SessionEntry;
@@ -34,6 +35,10 @@ struct TermeshCallbacks {
     cell_size: (f32, f32),
     /// Whether the session list panel is visible.
     show_session_list: bool,
+    /// Cached diff lines for the side panel.
+    diff_lines: Vec<DiffLine>,
+    /// Scroll offset for the side panel diff view.
+    side_panel_scroll: usize,
 }
 
 impl TermeshCallbacks {
@@ -46,6 +51,8 @@ impl TermeshCallbacks {
             window_size: (800, 600),
             cell_size: (8.0, 16.0),
             show_session_list: true,
+            diff_lines: Vec::new(),
+            side_panel_scroll: 0,
         }
     }
 
@@ -71,6 +78,8 @@ impl TermeshCallbacks {
             window_size: (800, 600),
             cell_size: (8.0, 16.0),
             show_session_list: true,
+            diff_lines: Vec::new(),
+            side_panel_scroll: 0,
         };
 
         // For single-pane presets, close the extra pane created by Dual layout
@@ -242,7 +251,8 @@ impl AppCallbacks for TermeshCallbacks {
                 self.layout.toggle_zoom();
             }
             Action::ToggleSidePanel => {
-                self.show_session_list = !self.show_session_list;
+                self.focus_layout.toggle_side_panel();
+                self.side_panel_scroll = 0;
             }
             Action::Copy | Action::Paste => { /* handled by platform layer */ }
         }
@@ -259,9 +269,10 @@ impl AppCallbacks for TermeshCallbacks {
         let (cell_w, cell_h) = self.cell_size;
         let mut grids = Vec::new();
 
+        let regions = self.focus_layout.compute_regions(screen_w, screen_h);
+
         // Render session list panel if visible
         if self.show_session_list {
-            let regions = self.focus_layout.compute_regions(screen_w, screen_h);
             let list_rect = regions.session_list;
             if list_rect.width > 0 && list_rect.height > 0 {
                 let list_cols = (list_rect.width as f32 / cell_w).floor() as usize;
@@ -273,52 +284,50 @@ impl AppCallbacks for TermeshCallbacks {
                 );
                 grids.push((list_grid, list_rect.x as f32, list_rect.y as f32));
             }
+        }
 
-            // Terminal grids offset by session list width
-            let terminal_x_offset = list_rect.width as f32;
-            for pane in self.layout.layout().panes() {
-                if !self.layout.is_pane_visible(pane.id) {
-                    continue;
-                }
-                if let Some(session_id) = pane.session_id {
-                    if let Some(terminal) = self.session_mgr.terminal(session_id) {
-                        let rect =
-                            pane.pixel_rect(screen_w.saturating_sub(list_rect.width), screen_h);
-                        grids.push((
-                            terminal.render_grid(),
-                            terminal_x_offset + rect.x as f32,
-                            rect.y as f32,
-                        ));
-                    }
-                }
+        // Render side panel if visible
+        let side_rect = regions.side_panel;
+        if side_rect.width > 0 && side_rect.height > 0 {
+            let panel_cols = (side_rect.width as f32 / cell_w).floor() as usize;
+            let panel_rows = (side_rect.height as f32 / cell_h).floor() as usize;
+            let panel_grid = ui_grid::render_side_panel(
+                self.focus_layout.side_panel(),
+                &self.diff_lines,
+                panel_rows,
+                panel_cols,
+                self.side_panel_scroll,
+            );
+            grids.push((panel_grid, side_rect.x as f32, side_rect.y as f32));
+        }
+
+        // Terminal grids in center region
+        let terminal_rect = regions.terminal;
+        for pane in self.layout.layout().panes() {
+            if !self.layout.is_pane_visible(pane.id) {
+                continue;
             }
-        } else {
-            // No session list — full-width terminal grids
-            for pane in self.layout.layout().panes() {
-                if !self.layout.is_pane_visible(pane.id) {
-                    continue;
-                }
-                if let Some(session_id) = pane.session_id {
-                    if let Some(terminal) = self.session_mgr.terminal(session_id) {
-                        let rect = pane.pixel_rect(screen_w, screen_h);
-                        grids.push((terminal.render_grid(), rect.x as f32, rect.y as f32));
-                    }
+            if let Some(session_id) = pane.session_id {
+                if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                    let rect = pane.pixel_rect(terminal_rect.width, screen_h);
+                    grids.push((
+                        terminal.render_grid(),
+                        terminal_rect.x as f32 + rect.x as f32,
+                        rect.y as f32,
+                    ));
                 }
             }
         }
+
         grids
     }
 
     fn dividers(&self) -> Vec<(f32, f32, f32, bool)> {
         let (w, h) = self.window_size;
-        let x_offset = if self.show_session_list {
-            let regions = self.focus_layout.compute_regions(w, h);
-            regions.session_list.width as f32
-        } else {
-            0.0
-        };
+        let regions = self.focus_layout.compute_regions(w, h);
+        let terminal_x = regions.terminal.x as f32;
+        let terminal_w = regions.terminal.width;
 
-        let terminal_w = w - x_offset as u32;
         let mut dividers: Vec<(f32, f32, f32, bool)> = self
             .layout
             .compute_dividers(terminal_w, h)
@@ -327,7 +336,7 @@ impl AppCallbacks for TermeshCallbacks {
                 let is_vertical =
                     d.orientation == termesh_layout::split_layout::DividerOrientation::Vertical;
                 (
-                    x_offset + d.x as f32,
+                    terminal_x + d.x as f32,
                     d.y as f32,
                     d.length as f32,
                     is_vertical,
@@ -336,8 +345,14 @@ impl AppCallbacks for TermeshCallbacks {
             .collect();
 
         // Add a vertical divider between session list and terminal area
-        if self.show_session_list && x_offset > 0.0 {
-            dividers.push((x_offset, 0.0, h as f32, true));
+        if self.show_session_list && regions.session_list.width > 0 {
+            dividers.push((terminal_x, 0.0, h as f32, true));
+        }
+
+        // Add a vertical divider between terminal and side panel
+        if regions.side_panel.width > 0 {
+            let side_x = regions.side_panel.x as f32;
+            dividers.push((side_x, 0.0, h as f32, true));
         }
 
         dividers
@@ -355,13 +370,9 @@ impl AppCallbacks for TermeshCallbacks {
         self.window_size = (width, height);
         self.cell_size = (cell_w, cell_h);
 
-        // Compute available width for terminal panes (subtract session list width)
-        let terminal_width = if self.show_session_list {
-            let regions = self.focus_layout.compute_regions(width, height);
-            width.saturating_sub(regions.session_list.width)
-        } else {
-            width
-        };
+        // Use focus layout regions to determine terminal area
+        let regions = self.focus_layout.compute_regions(width, height);
+        let terminal_width = regions.terminal.width;
 
         // Per-pane resize: each pane gets its own grid dimensions
         for pane in self.layout.layout().panes().to_vec() {
