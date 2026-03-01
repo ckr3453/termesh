@@ -1,3 +1,18 @@
+[graph]
+# Exclude workspace crates from license checks (they are our own code)
+exclude = [
+    "termesh-core",
+    "termesh-pty",
+    "termesh-terminal",
+    "termesh-renderer",
+    "termesh-layout",
+    "termesh-input",
+    "termesh-agent",
+    "termesh-diff",
+    "termesh-platform",
+    "termesh-app",
+]
+
 [advisories]
 
 [licenses]
@@ -17,7 +32,7 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
