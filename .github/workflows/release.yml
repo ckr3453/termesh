@@ -48,14 +48,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/termesh-app dist/termesh
+          cp target/${{ matrix.target }}/release/termesh dist/termesh
           cd dist && tar czf ../${{ matrix.artifact }}.tar.gz termesh
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir dist
-          copy target\${{ matrix.target }}\release\termesh-app.exe dist\termesh.exe
+          copy target\${{ matrix.target }}\release\termesh.exe dist\termesh.exe
           cd dist && tar czf ..\${{ matrix.artifact }}.tar.gz termesh.exe
 
       - name: Upload artifact
