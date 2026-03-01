@@ -122,10 +122,13 @@ impl Renderer {
             })?;
 
         let surface_caps = surface.get_capabilities(&adapter);
+        // Prefer non-sRGB format to avoid double gamma correction.
+        // Terminal colors are already in sRGB space (ANSI u8 values),
+        // so we pass them directly without linear conversion.
         let surface_format = surface_caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
