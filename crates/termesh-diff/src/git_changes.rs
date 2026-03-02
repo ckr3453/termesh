@@ -58,6 +58,9 @@ impl GitChangeTracker {
             return None;
         }
 
+        // Canonicalize to resolve symlinks (e.g., /var → /private/var on macOS)
+        let root = root.canonicalize().unwrap_or(root);
+
         // Compute scope prefix: cwd relative to git root
         let scope_prefix = cwd
             .canonicalize()
@@ -130,8 +133,13 @@ impl GitChangeTracker {
     /// - Modified files: old = content at session start, new = working tree
     /// - Added/Untracked files: old = `""`, new = working tree
     pub fn file_diff(&self, path: &Path) -> Option<(String, String)> {
-        let rel = self.relative_path(path)?;
-        let status = self.cached_files.iter().find(|f| f.path == path)?.status;
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let rel = self.relative_path(&canonical)?;
+        let status = self
+            .cached_files
+            .iter()
+            .find(|f| f.path == canonical)?
+            .status;
 
         let new_content = read_file_if_small(path)?;
 
