@@ -6,6 +6,11 @@ use std::collections::HashMap;
 /// Maximum texture atlas size (2048x2048).
 const ATLAS_SIZE: u32 = 2048;
 
+/// Minimum cell height (pixels) for MSDF rendering.
+/// Below this threshold, bitmap rasterization produces sharper results
+/// because the MSDF px_range becomes too small for smooth edges.
+const MSDF_MIN_CELL_HEIGHT: f32 = 32.0;
+
 /// Information about a cached glyph in the texture atlas.
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphInfo {
@@ -80,9 +85,11 @@ impl GlyphCache {
             return Some(info);
         }
 
-        // Try MSDF for primary font glyphs
-        if let Some(msdf) = font.rasterize_msdf(c) {
-            return self.insert_msdf(c, &msdf);
+        // Try MSDF for primary font glyphs (only at large enough sizes)
+        if font.metrics.cell_height >= MSDF_MIN_CELL_HEIGHT {
+            if let Some(msdf) = font.rasterize_msdf(c) {
+                return self.insert_msdf(c, &msdf);
+            }
         }
 
         // Fallback: bitmap rasterization
@@ -300,15 +307,30 @@ mod tests {
     }
 
     #[test]
-    fn test_primary_font_glyphs_use_msdf() {
+    fn test_primary_font_glyphs_use_msdf_at_large_size() {
+        // MSDF is only used when cell_height >= 32 (large font / HiDPI)
+        let font = load_builtin_font(28.0).unwrap();
+        assert!(
+            font.metrics.cell_height >= 32.0,
+            "28pt should have cell_height >= 32, got {}",
+            font.metrics.cell_height
+        );
+        let mut cache = GlyphCache::new();
+
+        let info = cache.get_or_insert('A', &font).unwrap();
+        assert!(info.is_msdf, "large size primary font should use MSDF");
+        assert_eq!(info.width, font.msdf_cell_size());
+        assert_eq!(info.height, font.msdf_cell_size());
+    }
+
+    #[test]
+    fn test_primary_font_uses_bitmap_at_small_size() {
+        // At 14pt DPI=1.0, cell_height < 32 → bitmap fallback
         let font = load_builtin_font(14.0).unwrap();
         let mut cache = GlyphCache::new();
 
         let info = cache.get_or_insert('A', &font).unwrap();
-        assert!(info.is_msdf, "primary font ASCII should use MSDF");
-        // MSDF glyphs are fixed-size atlas cells
-        assert_eq!(info.width, font.msdf_cell_size());
-        assert_eq!(info.height, font.msdf_cell_size());
+        assert!(!info.is_msdf, "small size should use bitmap, not MSDF");
     }
 
     #[test]
@@ -327,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_msdf_atlas_data_has_rgb_channels() {
-        let font = load_builtin_font(14.0).unwrap();
+        let font = load_builtin_font(28.0).unwrap();
         let mut cache = GlyphCache::new();
 
         let info = cache.get_or_insert('M', &font).unwrap();

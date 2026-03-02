@@ -549,8 +549,10 @@ impl Renderer {
                         if glyph.width > 0 && glyph.height > 0 {
                             if glyph.is_msdf {
                                 // MSDF glyph: render full cell quad, shader computes distance
-                                let px_range =
-                                    (glyph_cell_h / self.font.msdf_cell_size() as f32) * MSDF_RANGE;
+                                let msdf_size = self.font.msdf_cell_size() as f32;
+                                let scale =
+                                    (glyph_cell_w / msdf_size).min(glyph_cell_h / msdf_size);
+                                let px_range = (scale * MSDF_RANGE).max(1.0);
                                 self.glyph_buf.push(CellInstance {
                                     cell_pos: [x, y],
                                     cell_size: [bg_w, bg_h],

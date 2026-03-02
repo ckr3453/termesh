@@ -245,6 +245,22 @@ impl SessionManager {
                 SessionOutput::Data(data) => {
                     if let Some(session) = self.sessions.get_mut(&event.session_id) {
                         session.terminal.feed_bytes(&data);
+                        // Forward terminal write-back responses to the PTY.
+                        // Interactive programs query terminal capabilities (DA1, DSR)
+                        // and alacritty_terminal generates PtyWrite responses that
+                        // must be sent back for the program to proceed.
+                        for term_event in session.terminal.drain_events() {
+                            if let termesh_terminal::terminal::TermEvent::PtyWrite(response) =
+                                term_event
+                            {
+                                if let Err(e) = session.writer.write(response.as_bytes()) {
+                                    log::warn!(
+                                        "failed to write terminal response for session {}: {e}",
+                                        event.session_id
+                                    );
+                                }
+                            }
+                        }
                         // Queue for agent analysis if this session has an adapter
                         if let Some(adapter_id) = &session.adapter_id {
                             let text = String::from_utf8_lossy(&data);
