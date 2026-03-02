@@ -4,5 +4,6 @@
 //! for display in the side panel.
 
 pub mod diff_generator;
+pub mod git_changes;
 pub mod history;
 pub mod watcher;

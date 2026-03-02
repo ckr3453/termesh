@@ -27,13 +27,28 @@ pub struct ChangeRecord {
 /// Maximum number of cached files.
 const MAX_CACHE_FILES: usize = 500;
 
+/// Summary of a changed file for the file list UI.
+#[derive(Debug, Clone)]
+pub struct ChangedFile {
+    /// File path.
+    pub path: PathBuf,
+    /// Status character: 'M' modified, 'A' added (no initial snapshot).
+    pub status: char,
+    /// Number of inserted lines.
+    pub insertions: usize,
+    /// Number of deleted lines.
+    pub deletions: usize,
+}
+
 /// Manages file change history and content caching.
 #[derive(Debug)]
 pub struct ChangeHistory {
     /// Recent change records (newest last).
     records: VecDeque<ChangeRecord>,
-    /// Cached file contents for diff generation.
+    /// Cached file contents for diff generation (latest version).
     cache: HashMap<PathBuf, String>,
+    /// Initial file contents at first observation (for cumulative diff).
+    initial: HashMap<PathBuf, String>,
     /// Maximum records to keep.
     max_size: usize,
 }
@@ -44,6 +59,7 @@ impl ChangeHistory {
         Self {
             records: VecDeque::new(),
             cache: HashMap::new(),
+            initial: HashMap::new(),
             max_size: MAX_HISTORY_SIZE,
         }
     }
@@ -53,6 +69,7 @@ impl ChangeHistory {
         Self {
             records: VecDeque::new(),
             cache: HashMap::new(),
+            initial: HashMap::new(),
             max_size: max_size.max(1),
         }
     }
@@ -63,6 +80,9 @@ impl ChangeHistory {
     pub fn snapshot_file(&mut self, path: &Path) -> bool {
         match read_file_if_small(path) {
             Some(content) => {
+                if !self.initial.contains_key(path) {
+                    self.initial.insert(path.to_path_buf(), content.clone());
+                }
                 self.cache.insert(path.to_path_buf(), content);
                 true
             }
@@ -84,23 +104,30 @@ impl ChangeHistory {
             return false;
         }
 
-        let old_content = self.cache.get(path).cloned();
+        // Save initial content on first observation (for cumulative diff)
+        if !self.initial.contains_key(path) {
+            if let Some(cached) = self.cache.get(path) {
+                self.initial.insert(path.to_path_buf(), cached.clone());
+            }
+            // If no cache entry exists, this is a newly created file — no initial snapshot
+        }
 
-        let record = ChangeRecord {
-            path: path.to_path_buf(),
-            old_content,
-            new_content: new_content.clone(),
-            timestamp: SystemTime::now(),
-        };
-
-        // Update cache with new content, evict oldest if cache is full
+        // Evict oldest if cache is full and this is a new key
         if !self.cache.contains_key(path) && self.cache.len() >= MAX_CACHE_FILES {
-            // Remove the oldest cached entry (first key found)
             if let Some(oldest_key) = self.cache.keys().next().cloned() {
                 self.cache.remove(&oldest_key);
             }
         }
-        self.cache.insert(path.to_path_buf(), new_content);
+
+        // insert() returns the previous value — avoids cloning old_content
+        let old_content = self.cache.insert(path.to_path_buf(), new_content.clone());
+
+        let record = ChangeRecord {
+            path: path.to_path_buf(),
+            old_content,
+            new_content,
+            timestamp: SystemTime::now(),
+        };
 
         // Add record, evict oldest if at capacity
         if self.records.len() >= self.max_size {
@@ -140,11 +167,73 @@ impl ChangeHistory {
     pub fn clear(&mut self) {
         self.records.clear();
         self.cache.clear();
+        self.initial.clear();
     }
 
     /// Number of cached file snapshots.
     pub fn cache_size(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Get a list of all files that have changed since their initial observation.
+    ///
+    /// Compares initial snapshots against the latest cached content.
+    /// Files without an initial snapshot are marked as 'A' (added).
+    pub fn changed_files(&self) -> Vec<ChangedFile> {
+        use crate::diff_generator;
+
+        let mut files = Vec::new();
+        for (path, current) in &self.cache {
+            match self.initial.get(path) {
+                Some(initial) if initial == current => {
+                    // File reverted to initial state — not changed
+                }
+                Some(initial) => {
+                    let diff = diff_generator::diff_texts(initial, current);
+                    files.push(ChangedFile {
+                        path: path.clone(),
+                        status: 'M',
+                        insertions: diff.insertions,
+                        deletions: diff.deletions,
+                    });
+                }
+                None => {
+                    // No initial snapshot — file was created after watching started
+                    let lines = current.lines().count();
+                    files.push(ChangedFile {
+                        path: path.clone(),
+                        status: 'A',
+                        insertions: lines,
+                        deletions: 0,
+                    });
+                }
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+
+    /// Get the initial content for a file (at first observation).
+    pub fn initial_content(&self, path: &Path) -> Option<&str> {
+        self.initial.get(path).map(|s| s.as_str())
+    }
+
+    /// Get the current (latest) cached content for a file.
+    pub fn current_content(&self, path: &Path) -> Option<&str> {
+        self.cache.get(path).map(|s| s.as_str())
+    }
+
+    /// Get the cumulative diff for a specific file (initial vs current).
+    pub fn diff_for_file(&self, path: &Path) -> Option<crate::diff_generator::DiffResult> {
+        use crate::diff_generator;
+
+        let current = self.cache.get(path)?;
+        let initial = self.initial.get(path).map(|s| s.as_str()).unwrap_or("");
+        let result = diff_generator::diff_texts(initial, current);
+        if result.is_empty() && !initial.is_empty() {
+            return None; // File unchanged
+        }
+        Some(result)
     }
 }
 
@@ -319,5 +408,104 @@ mod tests {
         let path = PathBuf::from("/nonexistent/file.txt");
         assert!(!history.snapshot_file(&path));
         assert!(!history.record_change(&path));
+    }
+
+    #[test]
+    fn test_changed_files_modified() {
+        let path = temp_file("cf_mod.txt", "original\n");
+        let mut history = ChangeHistory::new();
+
+        history.snapshot_file(&path);
+        std::fs::write(&path, "modified\n").unwrap();
+        history.record_change(&path);
+
+        let files = history.changed_files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, 'M');
+        assert_eq!(files[0].insertions, 1);
+        assert_eq!(files[0].deletions, 1);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_changed_files_added() {
+        let path = temp_file("cf_add.txt", "new content\nline2\n");
+        let mut history = ChangeHistory::new();
+
+        // No snapshot — file treated as added
+        history.record_change(&path);
+
+        let files = history.changed_files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, 'A');
+        assert_eq!(files[0].insertions, 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_changed_files_reverted() {
+        let path = temp_file("cf_revert.txt", "original\n");
+        let mut history = ChangeHistory::new();
+
+        history.snapshot_file(&path);
+        std::fs::write(&path, "modified\n").unwrap();
+        history.record_change(&path);
+
+        // Revert to original
+        std::fs::write(&path, "original\n").unwrap();
+        history.record_change(&path);
+
+        let files = history.changed_files();
+        assert!(files.is_empty(), "reverted file should not appear");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_diff_for_file() {
+        let path = temp_file("df_test.txt", "line1\nline2\n");
+        let mut history = ChangeHistory::new();
+
+        history.snapshot_file(&path);
+        std::fs::write(&path, "line1\nchanged\nline3\n").unwrap();
+        history.record_change(&path);
+
+        let diff = history.diff_for_file(&path).unwrap();
+        assert!(diff.insertions > 0);
+        assert!(diff.deletions > 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_diff_for_file_added() {
+        let path = temp_file("df_add.txt", "new\n");
+        let mut history = ChangeHistory::new();
+
+        // No snapshot — diff against empty
+        history.record_change(&path);
+
+        let diff = history.diff_for_file(&path).unwrap();
+        assert_eq!(diff.insertions, 1);
+        assert_eq!(diff.deletions, 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_clear_resets_initial() {
+        let path = temp_file("clear_init.txt", "content\n");
+        let mut history = ChangeHistory::new();
+
+        history.snapshot_file(&path);
+        std::fs::write(&path, "new\n").unwrap();
+        history.record_change(&path);
+
+        history.clear();
+        assert!(history.changed_files().is_empty());
+
+        std::fs::remove_file(&path).ok();
     }
 }

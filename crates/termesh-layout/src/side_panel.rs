@@ -136,52 +136,33 @@ mod tests {
     }
 
     #[test]
-    fn test_next_tab_wraps() {
-        let mut panel =
-            SidePanel::with_tabs(vec![SidePanelTab::Diff, SidePanelTab::Preview], false);
+    fn test_next_tab_single() {
+        let mut panel = SidePanel::new();
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
-        panel.next_tab();
-        assert_eq!(panel.active_tab(), Some(SidePanelTab::Preview));
         panel.next_tab();
         assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
     }
 
     #[test]
-    fn test_prev_tab_wraps() {
-        let mut panel = SidePanel::with_tabs(
-            vec![
-                SidePanelTab::Diff,
-                SidePanelTab::Preview,
-                SidePanelTab::TestLog,
-            ],
-            false,
-        );
+    fn test_prev_tab_single() {
+        let mut panel = SidePanel::new();
         panel.prev_tab();
-        assert_eq!(panel.active_tab(), Some(SidePanelTab::TestLog));
-        panel.prev_tab();
-        assert_eq!(panel.active_tab(), Some(SidePanelTab::Preview));
+        assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
     }
 
     #[test]
     fn test_set_active() {
-        let mut panel = SidePanel::with_tabs(
-            vec![
-                SidePanelTab::Diff,
-                SidePanelTab::Preview,
-                SidePanelTab::TestLog,
-            ],
-            false,
-        );
-        panel.set_active(SidePanelTab::TestLog);
-        assert_eq!(panel.active_index(), 2);
-        assert_eq!(panel.active_tab(), Some(SidePanelTab::TestLog));
+        let mut panel = SidePanel::new();
+        panel.set_active(SidePanelTab::Diff);
+        assert_eq!(panel.active_index(), 0);
+        assert_eq!(panel.active_tab(), Some(SidePanelTab::Diff));
     }
 
     #[test]
     fn test_with_tabs() {
-        let panel = SidePanel::with_tabs(vec![SidePanelTab::Diff, SidePanelTab::Preview], true);
+        let panel = SidePanel::with_tabs(vec![SidePanelTab::Diff], true);
         assert!(panel.is_visible());
-        assert_eq!(panel.tabs().len(), 2);
+        assert_eq!(panel.tabs().len(), 1);
     }
 
     #[test]

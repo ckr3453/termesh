@@ -150,16 +150,16 @@ impl Keymap {
         map.bind(Keybinding::new(ps, Key::Up), Action::SidePanelScrollUp);
         // Primary+Shift+Down: side panel scroll down
         map.bind(Keybinding::new(ps, Key::Down), Action::SidePanelScrollDown);
-        // Primary+Shift+]: next side panel tab
-        map.bind(
-            Keybinding::new(ps, Key::Char(']')),
-            Action::SidePanelNextTab,
-        );
-        // Primary+Shift+[: prev side panel tab
-        map.bind(
-            Keybinding::new(ps, Key::Char('[')),
-            Action::SidePanelPrevTab,
-        );
+        // Primary+Shift+Enter: select file in side panel
+        map.bind(Keybinding::new(ps, Key::Enter), Action::SidePanelSelect);
+        // Primary+Shift+Escape: go back to file list in side panel
+        map.bind(Keybinding::new(ps, Key::Escape), Action::SidePanelBack);
+        // Primary+Shift+D: toggle unified/side-by-side diff mode
+        map.bind(Keybinding::new(ps, Key::Char('d')), Action::ToggleDiffMode);
+        // Primary+Tab: cycle focus region (SessionList ↔ Terminal ↔ SidePanel)
+        map.bind(Keybinding::new(p, Key::Tab), Action::CycleFocusRegion);
+        // Primary+S: swap session in focused pane (Split mode)
+        map.bind(Keybinding::new(p, Key::Char('s')), Action::SwapSession);
         // Ctrl+Shift+C: copy selection
         map.bind(
             Keybinding::new(Modifiers::CTRL_SHIFT, Key::Char('c')),
@@ -251,7 +251,7 @@ mod tests {
     fn test_default_keymap_has_bindings() {
         let keymap = Keymap::default_keymap();
         assert!(!keymap.is_empty());
-        assert!(keymap.len() >= 22);
+        assert!(keymap.len() >= 26);
     }
 
     #[test]

@@ -67,7 +67,11 @@ impl AuthMetadata {
     /// Delete metadata.
     pub fn delete(store: &LicenseStore) {
         let path = Self::path(store);
-        let _ = std::fs::remove_file(path);
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("failed to delete auth metadata: {e}");
+            }
+        }
     }
 }
 

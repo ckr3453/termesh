@@ -148,7 +148,9 @@ impl Session {
     ///
     /// Returns a receiver for `SessionOutput` messages.
     /// The reader thread runs until the PTY closes or an error occurs.
-    pub fn start_reader(mut self) -> (SessionHandle, mpsc::Receiver<SessionOutput>) {
+    pub fn start_reader(
+        mut self,
+    ) -> Result<(SessionHandle, mpsc::Receiver<SessionOutput>), PtyError> {
         let (tx, rx) = mpsc::channel(256);
         let id = self.id;
 
@@ -178,7 +180,9 @@ impl Session {
                     }
                 }
             })
-            .expect("failed to spawn PTY watcher thread");
+            .map_err(|e| PtyError::ThreadSpawnFailed {
+                reason: format!("pty-watcher-{id}: {e}"),
+            })?;
 
         let join = std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
@@ -210,10 +214,12 @@ impl Session {
                 }
                 self
             })
-            .expect("failed to spawn PTY reader thread");
+            .map_err(|e| PtyError::ThreadSpawnFailed {
+                reason: format!("pty-reader-{id}: {e}"),
+            })?;
 
         let handle = SessionHandle { id, join };
-        (handle, rx)
+        Ok((handle, rx))
     }
 }
 
@@ -321,7 +327,7 @@ mod tests {
     async fn test_start_reader() {
         let config = test_config();
         let session = Session::spawn(config).unwrap();
-        let (handle, mut rx) = session.start_reader();
+        let (handle, mut rx) = session.start_reader().unwrap();
 
         // Should receive some initial output
         let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;

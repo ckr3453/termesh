@@ -58,6 +58,36 @@
 
 ---
 
+## Phase 5.5: 코드 품질 리팩토링 ✅
+
+**목표**: 보안 위험, 메모리 비효율, 코드 품질 이슈를 정리하여 안정성과 유지보수성 확보
+
+### 메모리/효율 (2 tasks)
+- [x] 029: 렌더 루프 메모리 최적화 (매 프레임 Vec 할당 → 재사용 버퍼)
+- [x] 030: diff history 더블 클론 제거 (cache.insert() 반환값 활용)
+
+### 에러 처리/안전성 (1 task)
+- [x] 031: PTY 스레드 panic → Result 전환
+
+### 코드 정리 (2 tasks)
+- [x] 033: #[allow(dead_code)] 정리 + 스텁 탭(Preview/TestLog) 제거
+- [x] 034: 에러 메시지 경로 노출 제거 + silent 에러 로깅
+
+---
+
+## Phase 5.6: 사이드 패널 개선 ✅
+
+**목표**: diff 뷰를 실용적 수준으로 강화, 렌더링 품질 향상
+
+### Diff UX (2 tasks)
+- [x] 035: 변경 파일 목록 + 파일 선택 diff (blocked_by: 033)
+- [x] 036: Unified / Side-by-side diff 모드 전환 (blocked_by: 035)
+
+### 렌더링 품질 (1 task)
+- [x] 037: MSDF 폰트 렌더링 도입 (blocked_by: 029)
+
+---
+
 ## Phase 6: 원격 접속
 
 **목표**: PC에서 나가도 폰으로 이어서 작업

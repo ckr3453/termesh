@@ -2,9 +2,24 @@
 //!
 //! Supports a primary monospace font with system fallback fonts
 //! for CJK (Korean, Chinese, Japanese) and emoji characters.
+//!
+//! Primary font glyphs use MSDF (Multi-channel Signed Distance Field)
+//! for resolution-independent rendering. Fallback fonts use bitmap rasterization.
 
+use fdsm::generate::generate_msdf;
+use fdsm::render::correct_sign_msdf;
+use fdsm::shape::Shape;
+use fdsm::transform::Transform;
 use fontdue::{Font, FontSettings};
+use image::RgbImage;
+use nalgebra::{Affine2, Matrix3};
 use termesh_core::error::RenderError;
+
+/// MSDF atlas cell height in pixels.
+const MSDF_CELL_SIZE: u32 = 48;
+
+/// SDF range in MSDF pixels (controls the soft edge width).
+const MSDF_RANGE: f64 = 4.0;
 
 /// Monospace font metrics.
 #[derive(Debug, Clone, Copy)]
@@ -19,12 +34,24 @@ pub struct FontMetrics {
     pub font_size: f32,
 }
 
+/// MSDF rasterization result for a single glyph.
+pub struct MsdfGlyph {
+    /// RGB distance field pixel data (3 bytes per pixel, row-major).
+    pub pixels: Vec<u8>,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
 /// Loaded font with fallback chain for rasterization.
 pub struct LoadedFont {
     pub font: Font,
     pub metrics: FontMetrics,
     /// Fallback fonts for characters not in the primary font.
-    fallbacks: Vec<Font>,
+    pub(crate) fallbacks: Vec<Font>,
+    /// Raw font data for ttf-parser (needed for MSDF generation).
+    font_data: Vec<u8>,
 }
 
 impl LoadedFont {
@@ -43,6 +70,7 @@ impl LoadedFont {
             font,
             metrics,
             fallbacks,
+            font_data: data.to_vec(),
         })
     }
 
@@ -62,6 +90,72 @@ impl LoadedFont {
 
         // No font has this glyph — return primary font's .notdef
         self.font.rasterize(c, self.metrics.font_size)
+    }
+
+    /// Generate MSDF for a primary-font glyph.
+    ///
+    /// Returns `None` if the character is not in the primary font
+    /// or has no outline (e.g., space).
+    pub fn rasterize_msdf(&self, c: char) -> Option<MsdfGlyph> {
+        if !self.font.has_glyph(c) {
+            return None;
+        }
+
+        let face = ttf_parser::Face::parse(&self.font_data, 0).ok()?;
+        let glyph_id = face.glyph_index(c)?;
+        let shape = fdsm_ttf_parser::load_shape_from_face(&face, glyph_id)?;
+
+        let upem = face.units_per_em() as f64;
+        let ascent = face.ascender() as f64;
+        let size = MSDF_CELL_SIZE as f64;
+        let range = MSDF_RANGE;
+
+        // Scale from font units to MSDF pixel space.
+        // Maps the full EM box to the content area (size - 2*range).
+        let scale = (size - 2.0 * range) / upem;
+
+        // Affine transform: scale + flip Y + translate.
+        // Font coords: y-up, baseline at y=0
+        // Pixel coords: y-down, origin at top-left
+        let transform = Affine2::from_matrix_unchecked(Matrix3::new(
+            scale,
+            0.0,
+            range,
+            0.0,
+            -scale,
+            range + ascent * scale,
+            0.0,
+            0.0,
+            1.0,
+        ));
+
+        let mut shape = shape;
+        shape.transform(&transform);
+
+        let colored = Shape::edge_coloring_simple(shape, 3.0, 0);
+        let prepared = colored.prepare();
+
+        let mut img = RgbImage::new(MSDF_CELL_SIZE, MSDF_CELL_SIZE);
+        generate_msdf(&prepared, range, &mut img);
+        correct_sign_msdf(
+            &mut img,
+            &prepared,
+            fdsm::bezier::scanline::FillRule::Nonzero,
+        );
+
+        // Convert to raw RGB bytes
+        let pixels = img.into_raw();
+
+        Some(MsdfGlyph {
+            pixels,
+            width: MSDF_CELL_SIZE,
+            height: MSDF_CELL_SIZE,
+        })
+    }
+
+    /// MSDF cell size in pixels.
+    pub fn msdf_cell_size(&self) -> u32 {
+        MSDF_CELL_SIZE
     }
 }
 
@@ -260,6 +354,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_msdf_generation_ascii() {
+        let font = load_builtin_font(14.0).unwrap();
+        let msdf = font.rasterize_msdf('A');
+        assert!(msdf.is_some(), "MSDF should succeed for ASCII 'A'");
+
+        let msdf = msdf.unwrap();
+        assert_eq!(msdf.width, MSDF_CELL_SIZE);
+        assert_eq!(msdf.height, MSDF_CELL_SIZE);
+        assert_eq!(
+            msdf.pixels.len(),
+            (MSDF_CELL_SIZE * MSDF_CELL_SIZE * 3) as usize
+        );
+
+        // SDF should have some variation (not all zeros or all max)
+        let has_low = msdf.pixels.iter().any(|&b| b < 64);
+        let has_high = msdf.pixels.iter().any(|&b| b > 192);
+        assert!(
+            has_low && has_high,
+            "MSDF should contain distance field variation"
+        );
+    }
+
+    #[test]
+    fn test_msdf_generation_multiple_chars() {
+        let font = load_builtin_font(14.0).unwrap();
+        for c in ['a', 'z', 'M', '0', '9', '@', '#'] {
+            let msdf = font.rasterize_msdf(c);
+            assert!(msdf.is_some(), "MSDF should succeed for '{c}'");
+        }
+    }
+
+    #[test]
+    fn test_msdf_none_for_space() {
+        let font = load_builtin_font(14.0).unwrap();
+        // Space has no outline — should return None
+        let msdf = font.rasterize_msdf(' ');
+        assert!(msdf.is_none(), "Space glyph has no outline for MSDF");
+    }
+
+    #[test]
+    fn test_msdf_none_for_fallback_char() {
+        let font = load_builtin_font(14.0).unwrap();
+        // CJK character is not in primary font
+        let msdf = font.rasterize_msdf('가');
+        assert!(msdf.is_none(), "Fallback chars should not use MSDF");
     }
 
     #[test]

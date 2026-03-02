@@ -1,7 +1,8 @@
 // Terminal cell renderer shader.
 //
-// Renders both cell backgrounds (as colored quads) and
-// text glyphs (from a texture atlas) in a single pass.
+// Renders cell backgrounds (as colored quads) and text glyphs using:
+// - Bitmap mode: grayscale alpha from texture atlas
+// - MSDF mode: multi-channel signed distance field for resolution-independent text
 
 struct Uniforms {
     projection: mat4x4<f32>,
@@ -30,7 +31,8 @@ struct VertexInput {
     @location(5) uv_size: vec2<f32>,     // atlas UV size (normalized)
     @location(6) glyph_offset: vec2<f32>, // glyph offset within cell
     @location(7) glyph_size: vec2<f32>,  // glyph size in pixels
-    @location(8) has_glyph: f32,         // 1.0 if has glyph, 0.0 for bg-only
+    @location(8) glyph_mode: f32,        // 0.0=bg-only, 1.0=bitmap, 2.0=MSDF
+    @location(9) msdf_px_range: f32,     // MSDF screen pixel range (0 for bitmap)
 };
 
 struct VertexOutput {
@@ -38,7 +40,8 @@ struct VertexOutput {
     @location(0) fg_color: vec4<f32>,
     @location(1) bg_color: vec4<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) is_glyph: f32,
+    @location(3) glyph_mode: f32,
+    @location(4) msdf_px_range: f32,
 };
 
 @vertex
@@ -59,7 +62,8 @@ fn vs_background(input: VertexInput) -> VertexOutput {
     output.fg_color = input.fg_color;
     output.bg_color = input.bg_color;
     output.uv = vec2<f32>(0.0, 0.0);
-    output.is_glyph = 0.0;
+    output.glyph_mode = 0.0;
+    output.msdf_px_range = 0.0;
     return output;
 }
 
@@ -86,13 +90,30 @@ fn vs_glyph(input: VertexInput) -> VertexOutput {
     output.fg_color = input.fg_color;
     output.bg_color = input.bg_color;
     output.uv = uv;
-    output.is_glyph = 1.0;
+    output.glyph_mode = input.glyph_mode;
+    output.msdf_px_range = input.msdf_px_range;
     return output;
+}
+
+/// Median of three values — extracts the signed distance from MSDF channels.
+fn median3(r: f32, g: f32, b: f32) -> f32 {
+    return max(min(r, g), min(max(r, g), b));
 }
 
 @fragment
 fn fs_glyph(input: VertexOutput) -> @location(0) vec4<f32> {
     let atlas_sample = textureSample(atlas_texture, atlas_sampler, input.uv);
-    let alpha = atlas_sample.a;
+
+    var alpha: f32;
+    if input.glyph_mode > 1.5 {
+        // MSDF mode: compute signed distance from RGB channels
+        let sd = median3(atlas_sample.r, atlas_sample.g, atlas_sample.b);
+        let screen_px_distance = input.msdf_px_range * (sd - 0.5);
+        alpha = clamp(screen_px_distance + 0.5, 0.0, 1.0);
+    } else {
+        // Bitmap mode: use alpha channel directly
+        alpha = atlas_sample.a;
+    }
+
     return vec4<f32>(input.fg_color.rgb, input.fg_color.a * alpha);
 }

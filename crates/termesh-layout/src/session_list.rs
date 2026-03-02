@@ -144,6 +144,13 @@ impl SessionList {
         }
     }
 
+    /// Update the `is_agent` flag for a session.
+    pub fn update_is_agent(&mut self, id: SessionId, is_agent: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.is_agent = is_agent;
+        }
+    }
+
     /// Select the next session (wrapping around).
     pub fn select_next(&mut self) {
         if !self.entries.is_empty() {

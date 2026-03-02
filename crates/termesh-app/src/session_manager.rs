@@ -1,6 +1,7 @@
 //! Manages multiple PTY sessions and their associated terminals.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use termesh_agent::registry::AdapterRegistry;
 use termesh_core::error::PtyError;
 use termesh_core::types::{AgentState, SessionId};
@@ -50,6 +51,9 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+/// Maximum number of adapter detection attempts before giving up.
+const MAX_DETECT_ATTEMPTS: u32 = 20;
+
 /// A PTY session paired with its terminal emulator.
 struct ManagedSession {
     /// Writer handle for sending input to the PTY.
@@ -62,6 +66,10 @@ struct ManagedSession {
     adapter_id: Option<String>,
     /// Current detected agent state.
     agent_state: AgentState,
+    /// Working directory for this session.
+    cwd: PathBuf,
+    /// Number of adapter detection attempts (stops after MAX_DETECT_ATTEMPTS).
+    detect_attempts: u32,
 }
 
 /// Output received from any session.
@@ -105,6 +113,10 @@ impl SessionManager {
         let command = config.command.clone();
         let agent_hint = config.agent.clone();
         let config_name = config.name.clone();
+        let cwd = config
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         let mut session = Session::spawn(config)?;
         let id = session.id;
@@ -118,7 +130,7 @@ impl SessionManager {
         let terminal = Terminal::new(rows as usize, cols as usize, DEFAULT_SCROLLBACK);
 
         // Start the background reader thread
-        let (_handle, mut output_rx) = session.start_reader();
+        let (_handle, mut output_rx) = session.start_reader()?;
         let event_tx = self.event_tx.clone();
         let session_id = id;
 
@@ -165,6 +177,8 @@ impl SessionManager {
                 terminal,
                 adapter_id,
                 agent_state,
+                cwd,
+                detect_attempts: 0,
             },
         );
 
@@ -245,16 +259,27 @@ impl SessionManager {
                 SessionOutput::Data(data) => {
                     if let Some(session) = self.sessions.get_mut(&event.session_id) {
                         session.terminal.feed_bytes(&data);
-                        // Queue for agent analysis if this session has an adapter
-                        if let Some(adapter_id) = &session.adapter_id {
-                            let text = String::from_utf8_lossy(&data);
-                            if !text.trim().is_empty() {
-                                analyze_queue.push((
-                                    event.session_id,
-                                    adapter_id.clone(),
-                                    text.into_owned(),
-                                ));
+                        // Forward terminal write-back responses to the PTY.
+                        // Interactive programs query terminal capabilities (DA1, DSR)
+                        // and alacritty_terminal generates PtyWrite responses that
+                        // must be sent back for the program to proceed.
+                        for term_event in session.terminal.drain_events() {
+                            if let termesh_terminal::terminal::TermEvent::PtyWrite(response) =
+                                term_event
+                            {
+                                if let Err(e) = session.writer.write(response.as_bytes()) {
+                                    log::warn!(
+                                        "failed to write terminal response for session {}: {e}",
+                                        event.session_id
+                                    );
+                                }
                             }
+                        }
+                        // Queue for agent analysis (with adapter_id, or empty for detection)
+                        let text = String::from_utf8_lossy(&data);
+                        if !text.trim().is_empty() {
+                            let aid = session.adapter_id.as_deref().unwrap_or("").to_string();
+                            analyze_queue.push((event.session_id, aid, text.into_owned()));
                         }
                     }
                 }
@@ -274,7 +299,29 @@ impl SessionManager {
                     log::debug!("agent-pty [{session_id}]: {trimmed:?}");
                 }
             }
-            if let Some(adapter) = self.registry.get(&adapter_id) {
+            if adapter_id.is_empty() {
+                // No adapter yet — try all adapters for dynamic detection
+                // Stop after MAX_DETECT_ATTEMPTS to avoid scanning plain shells forever
+                let attempts = self
+                    .sessions
+                    .get(&session_id)
+                    .map_or(u32::MAX, |s| s.detect_attempts);
+                if attempts < MAX_DETECT_ATTEMPTS {
+                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                        session.detect_attempts += 1;
+                    }
+                    if let Some((detected_id, new_state)) = self.registry.try_analyze_all(&text) {
+                        let detected_id = detected_id.to_string();
+                        log::info!(
+                            "session {session_id}: detected agent adapter '{detected_id}', state {new_state:?}"
+                        );
+                        if let Some(session) = self.sessions.get_mut(&session_id) {
+                            session.adapter_id = Some(detected_id);
+                            session.agent_state = new_state;
+                        }
+                    }
+                }
+            } else if let Some(adapter) = self.registry.get(&adapter_id) {
                 if let Some(new_state) = adapter.analyze_output(&text) {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
                         if session.agent_state != new_state {
@@ -354,6 +401,11 @@ impl SessionManager {
             .get(&id)
             .and_then(|s| s.adapter_id.as_deref())
             .unwrap_or("shell")
+    }
+
+    /// Get the working directory for a session.
+    pub fn session_cwd(&self, id: SessionId) -> Option<&std::path::Path> {
+        self.sessions.get(&id).map(|s| s.cwd.as_path())
     }
 }
 

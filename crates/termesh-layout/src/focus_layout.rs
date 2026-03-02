@@ -15,7 +15,7 @@ const DEFAULT_SIDE_PANEL_WIDTH: u32 = 300;
 const MIN_TERMINAL_WIDTH: u32 = 200;
 
 /// Height reserved for the header bar (in rows).
-pub const HEADER_HEIGHT: u32 = 1;
+pub const HEADER_HEIGHT: u32 = 0;
 
 /// Height reserved for the status bar (in rows).
 pub const STATUS_HEIGHT: u32 = 1;

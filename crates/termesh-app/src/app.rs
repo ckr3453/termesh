@@ -66,13 +66,8 @@ impl App {
         };
 
         let mut focus_layout = match &preset.side_panel {
-            Some(panel) => match panel.as_str() {
-                "diff" => FocusLayout::with_side_panel(SidePanelTab::Diff),
-                "preview" => FocusLayout::with_side_panel(SidePanelTab::Preview),
-                "testlog" => FocusLayout::with_side_panel(SidePanelTab::TestLog),
-                _ => FocusLayout::new(),
-            },
-            None => FocusLayout::new(),
+            Some(panel) if panel == "diff" => FocusLayout::with_side_panel(SidePanelTab::Diff),
+            _ => FocusLayout::new(),
         };
 
         let mut next_id = 1u64;
