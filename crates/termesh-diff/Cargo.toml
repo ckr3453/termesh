@@ -8,3 +8,6 @@ license.workspace = true
 similar = "2"
 notify = "8"
 log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -11,12 +11,72 @@ use termesh_terminal::grid::{CursorState, GridSnapshot, RenderableCell};
 
 // ── Session list ───────────────────────────────────────────────────────────
 
+/// What a visual row in the session list represents.
+enum DisplayRow {
+    /// Project name header (e.g. "  termesh").
+    Header(String),
+    /// An entry from `SessionList::entries()` at the given index.
+    Entry(usize),
+}
+
+/// Build a display plan that groups entries by git project.
+///
+/// Consecutive entries with the same non-empty project get a single header.
+/// Entries with an empty project string appear without a header.
+fn build_display_plan(entry_count: usize, git_projects: &[String]) -> Vec<DisplayRow> {
+    let mut plan = Vec::with_capacity(entry_count * 2);
+    let mut prev_project: Option<&str> = None;
+
+    for idx in 0..entry_count {
+        let project = git_projects.get(idx).map(|s| s.as_str()).unwrap_or("");
+        if !project.is_empty() {
+            let need_header = match prev_project {
+                Some(prev) => prev != project,
+                None => true,
+            };
+            if need_header {
+                plan.push(DisplayRow::Header(project.to_string()));
+            }
+        }
+        plan.push(DisplayRow::Entry(idx));
+        prev_project = Some(project);
+    }
+
+    plan
+}
+
+/// Compute scroll offset so the selected entry is visible within the viewport.
+fn compute_scroll_offset(
+    plan: &[DisplayRow],
+    selected_index: usize,
+    viewport_rows: usize,
+) -> usize {
+    // Find the visual row of the selected entry.
+    let selected_row = plan
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Entry(idx) if *idx == selected_index));
+
+    let Some(selected_row) = selected_row else {
+        return 0;
+    };
+
+    // If the selected row is beyond the viewport, scroll down.
+    if selected_row >= viewport_rows {
+        selected_row - viewport_rows + 1
+    } else {
+        0
+    }
+}
+
 /// Render a session list into a GridSnapshot (minimal design).
 ///
-/// Layout: entries only, no header/footer chrome.
+/// Layout: entries grouped by git project, with optional project headers.
 /// ```text
-///   ⠋ Backend
-///   · Frontend                 shell
+/// ─ termesh ─────────────
+///   ⠋ Backend          claude
+///   · Frontend         shell
+/// ─ my-app ──────────────
+///   ⠋ API              claude
 /// ```
 /// Selected entry uses `BG_SELECTED` background.
 /// When editing, the selected row shows an inline text input.
@@ -26,58 +86,176 @@ pub fn render_session_list(
     cols: usize,
     spinner_frame: usize,
     agent_kinds: &[String],
+    git_projects: &[String],
 ) -> GridSnapshot {
     let cols = cols.max(1);
     let rows = rows.max(1);
     let mut cells = Vec::with_capacity(rows * cols);
 
     let is_editing = list.is_editing();
+    let display_plan = build_display_plan(list.entries().len(), git_projects);
+
+    // Compute scroll offset so the selected entry is always visible.
+    let scroll_offset = compute_scroll_offset(&display_plan, list.selected_index(), rows);
 
     for row in 0..rows {
-        let entry = list.entries().get(row);
-        let is_selected = entry.is_some() && row == list.selected_index();
-        let bg = if is_selected { BG_SELECTED } else { BG_SURFACE };
-
-        if is_selected && is_editing {
-            // Inline editing: render "  {buffer}|" with cursor
-            if let Some(edit) = list.edit_state() {
-                let buffer = edit.text();
-                let cursor_pos = edit.cursor();
-                let prefix = "  ";
+        match display_plan.get(row + scroll_offset) {
+            Some(DisplayRow::Header(project)) => {
+                // "  {project}" with remaining space filled by blanks
+                let prefix = format!("  {}", project);
                 let prefix_chars: Vec<char> = prefix.chars().collect();
-                let buf_chars: Vec<char> = buffer.chars().collect();
-
                 for col_idx in 0..cols {
-                    if col_idx < prefix_chars.len() {
-                        cells.push(RenderableCell {
-                            row,
-                            col: col_idx,
-                            c: prefix_chars[col_idx],
-                            fg: FG_PRIMARY,
-                            bg,
-                            ..Default::default()
-                        });
+                    let c = if col_idx < prefix_chars.len() {
+                        prefix_chars[col_idx]
                     } else {
-                        let buf_idx = col_idx - prefix_chars.len();
-                        let is_cursor = buf_idx == cursor_pos;
-                        if buf_idx < buf_chars.len() {
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: buf_chars[buf_idx],
-                                // Cursor: inverted colors
-                                fg: if is_cursor { BG_SURFACE } else { FG_PRIMARY },
-                                bg: if is_cursor { FG_PRIMARY } else { bg },
-                                ..Default::default()
-                            });
-                        } else if is_cursor {
-                            // Cursor at end of buffer
+                        ' '
+                    };
+                    cells.push(RenderableCell {
+                        row,
+                        col: col_idx,
+                        c,
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
+                }
+            }
+            Some(DisplayRow::Entry(idx)) => {
+                let entry = &list.entries()[*idx];
+                let is_selected = *idx == list.selected_index();
+                let bg = if is_selected { BG_SELECTED } else { BG_SURFACE };
+
+                if is_selected && is_editing {
+                    // Inline editing: render "  {buffer}|" with cursor
+                    if let Some(edit) = list.edit_state() {
+                        let buffer = edit.text();
+                        let cursor_pos = edit.cursor();
+                        let prefix = "  ";
+                        let prefix_chars: Vec<char> = prefix.chars().collect();
+                        let buf_chars: Vec<char> = buffer.chars().collect();
+
+                        for col_idx in 0..cols {
+                            if col_idx < prefix_chars.len() {
+                                cells.push(RenderableCell {
+                                    row,
+                                    col: col_idx,
+                                    c: prefix_chars[col_idx],
+                                    fg: FG_PRIMARY,
+                                    bg,
+                                    ..Default::default()
+                                });
+                            } else {
+                                let buf_idx = col_idx - prefix_chars.len();
+                                let is_cursor = buf_idx == cursor_pos;
+                                if buf_idx < buf_chars.len() {
+                                    cells.push(RenderableCell {
+                                        row,
+                                        col: col_idx,
+                                        c: buf_chars[buf_idx],
+                                        // Cursor: inverted colors
+                                        fg: if is_cursor { BG_SURFACE } else { FG_PRIMARY },
+                                        bg: if is_cursor { FG_PRIMARY } else { bg },
+                                        ..Default::default()
+                                    });
+                                } else if is_cursor {
+                                    // Cursor at end of buffer
+                                    cells.push(RenderableCell {
+                                        row,
+                                        col: col_idx,
+                                        c: ' ',
+                                        fg: BG_SURFACE,
+                                        bg: FG_PRIMARY,
+                                        ..Default::default()
+                                    });
+                                } else {
+                                    cells.push(RenderableCell {
+                                        row,
+                                        col: col_idx,
+                                        c: ' ',
+                                        fg: FG_PRIMARY,
+                                        bg,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        fill_row(&mut cells, row, cols, ' ', FG_PRIMARY, bg);
+                    }
+                } else {
+                    // Normal entry: "  {icon} {label}                claude"
+                    let (state_icon, state_fg) = state_icon_and_color(entry.state, spinner_frame);
+                    let fg = if entry.is_agent {
+                        FG_PRIMARY
+                    } else {
+                        FG_SECONDARY
+                    };
+
+                    // Right-side label: agent kind from dynamic lookup
+                    let right_label = agent_kinds.get(*idx).map(|s| s.as_str()).unwrap_or("");
+                    let right_chars: Vec<char> = right_label.chars().collect();
+                    let right_start = if right_chars.is_empty() {
+                        cols
+                    } else {
+                        cols.saturating_sub(right_chars.len() + 1)
+                    };
+
+                    // "  {icon} {label}"
+                    let label_chars: Vec<char> = entry.label.chars().collect();
+                    let icon_col = 2;
+                    let label_start = 4; // "  X "
+
+                    for col_idx in 0..cols {
+                        if col_idx < 2 {
+                            // Padding
                             cells.push(RenderableCell {
                                 row,
                                 col: col_idx,
                                 c: ' ',
-                                fg: BG_SURFACE,
-                                bg: FG_PRIMARY,
+                                fg,
+                                bg,
+                                ..Default::default()
+                            });
+                        } else if col_idx == icon_col {
+                            cells.push(RenderableCell {
+                                row,
+                                col: col_idx,
+                                c: state_icon,
+                                fg: state_fg,
+                                bg,
+                                ..Default::default()
+                            });
+                        } else if col_idx == 3 {
+                            // Space after icon
+                            cells.push(RenderableCell {
+                                row,
+                                col: col_idx,
+                                c: ' ',
+                                fg,
+                                bg,
+                                ..Default::default()
+                            });
+                        } else if col_idx >= label_start
+                            && col_idx - label_start < label_chars.len()
+                            && col_idx < right_start
+                        {
+                            cells.push(RenderableCell {
+                                row,
+                                col: col_idx,
+                                c: label_chars[col_idx - label_start],
+                                fg,
+                                bg,
+                                ..Default::default()
+                            });
+                        } else if col_idx >= right_start
+                            && col_idx - right_start < right_chars.len()
+                        {
+                            cells.push(RenderableCell {
+                                row,
+                                col: col_idx,
+                                c: right_chars[col_idx - right_start],
+                                fg: FG_MUTED,
+                                bg,
                                 ..Default::default()
                             });
                         } else {
@@ -85,104 +263,18 @@ pub fn render_session_list(
                                 row,
                                 col: col_idx,
                                 c: ' ',
-                                fg: FG_PRIMARY,
+                                fg,
                                 bg,
                                 ..Default::default()
                             });
                         }
                     }
                 }
-            } else {
-                fill_row(&mut cells, row, cols, ' ', FG_PRIMARY, bg);
             }
-        } else if let Some(entry) = entry {
-            // Normal entry: "  {icon} {label}                claude"
-            let (state_icon, state_fg) = state_icon_and_color(entry.state, spinner_frame);
-            let fg = if entry.is_agent {
-                FG_PRIMARY
-            } else {
-                FG_SECONDARY
-            };
-
-            // Right-side label: agent kind from dynamic lookup
-            let right_label = agent_kinds.get(row).map(|s| s.as_str()).unwrap_or("");
-            let right_chars: Vec<char> = right_label.chars().collect();
-            let right_start = if right_chars.is_empty() {
-                cols
-            } else {
-                cols.saturating_sub(right_chars.len() + 1)
-            };
-
-            // "  {icon} {label}"
-            let label_chars: Vec<char> = entry.label.chars().collect();
-            let icon_col = 2;
-            let label_start = 4; // "  X "
-
-            for col_idx in 0..cols {
-                if col_idx < 2 {
-                    // Padding
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: ' ',
-                        fg,
-                        bg,
-                        ..Default::default()
-                    });
-                } else if col_idx == icon_col {
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: state_icon,
-                        fg: state_fg,
-                        bg,
-                        ..Default::default()
-                    });
-                } else if col_idx == 3 {
-                    // Space after icon
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: ' ',
-                        fg,
-                        bg,
-                        ..Default::default()
-                    });
-                } else if col_idx >= label_start
-                    && col_idx - label_start < label_chars.len()
-                    && col_idx < right_start
-                {
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: label_chars[col_idx - label_start],
-                        fg,
-                        bg,
-                        ..Default::default()
-                    });
-                } else if col_idx >= right_start && col_idx - right_start < right_chars.len() {
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: right_chars[col_idx - right_start],
-                        fg: FG_MUTED,
-                        bg,
-                        ..Default::default()
-                    });
-                } else {
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c: ' ',
-                        fg,
-                        bg,
-                        ..Default::default()
-                    });
-                }
+            None => {
+                // Empty row
+                fill_row(&mut cells, row, cols, ' ', FG_PRIMARY, BG_SURFACE);
             }
-        } else {
-            // Empty row
-            fill_row(&mut cells, row, cols, ' ', FG_PRIMARY, BG_SURFACE);
         }
     }
 
@@ -232,86 +324,6 @@ fn state_icon_and_color(state: AgentState, spinner_frame: usize) -> (char, Rgba)
 
 // ── Header bar ─────────────────────────────────────────────────────────────
 
-/// Render a header bar into a GridSnapshot.
-///
-/// New minimal format: `  Backend                         ⠋ Thinking `
-/// Left: session name. Right: state icon + state label (colored by state).
-pub fn render_header_bar(
-    cols: usize,
-    _view_mode: ViewMode,
-    session_label: Option<&str>,
-    agent_state: Option<AgentState>,
-    spinner_frame: usize,
-) -> GridSnapshot {
-    let cols = cols.max(1);
-    let mut cells = Vec::with_capacity(cols);
-
-    let left = match session_label {
-        Some(label) => format!("  {label}"),
-        None => "  termesh".to_string(),
-    };
-    let left_chars: Vec<char> = left.chars().collect();
-
-    // Right side: state icon + state name
-    let (right_text, state_fg) = match agent_state {
-        Some(state) => {
-            let (icon, fg) = state_icon_and_color(state, spinner_frame);
-            let name = state_name(state);
-            if name.is_empty() {
-                (String::new(), fg)
-            } else {
-                (format!("{icon} {name} "), fg)
-            }
-        }
-        None => (String::new(), FG_SECONDARY),
-    };
-    let right_chars: Vec<char> = right_text.chars().collect();
-    let right_start = cols.saturating_sub(right_chars.len());
-
-    for col in 0..cols {
-        if col < left_chars.len() {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: left_chars[col],
-                fg: FG_PRIMARY,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        } else if col >= right_start && col - right_start < right_chars.len() {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: right_chars[col - right_start],
-                fg: state_fg,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        } else {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: ' ',
-                fg: FG_SECONDARY,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        }
-    }
-
-    GridSnapshot {
-        cells,
-        rows: 1,
-        cols,
-        cursor: CursorState {
-            row: 0,
-            col: 0,
-            visible: false,
-        },
-        selection: None,
-    }
-}
-
 // ── Status bar ─────────────────────────────────────────────────────────────
 
 /// Render a status bar into a GridSnapshot.
@@ -344,6 +356,7 @@ pub fn render_status_bar(
         ],
         ViewMode::Split => vec![
             (format!("{P}N"), "New"),
+            (format!("{P}S"), "Swap"),
             (format!("{P}1-9"), "Pane"),
             (format!("{P}["), "Prev"),
             (format!("{P}]"), "Next"),
@@ -867,10 +880,46 @@ pub fn render_file_list(
     }
 }
 
-// ── Private helpers ────────────────────────────────────────────────────────
+// ── Shared rendering helpers ──────────────────────────────────────────────
+
+/// Render a centered text row into cells.
+pub(crate) fn push_centered_row(
+    cells: &mut Vec<RenderableCell>,
+    row: usize,
+    cols: usize,
+    text: &str,
+    fg: Rgba,
+    bg: Rgba,
+) {
+    let chars: Vec<char> = text.chars().collect();
+    let pad = cols.saturating_sub(chars.len()) / 2;
+    for col in 0..cols {
+        let ch_idx = col.wrapping_sub(pad);
+        let c = if col >= pad && ch_idx < chars.len() {
+            chars[ch_idx]
+        } else {
+            ' '
+        };
+        cells.push(RenderableCell {
+            row,
+            col,
+            c,
+            fg,
+            bg,
+            ..Default::default()
+        });
+    }
+}
 
 /// Fill an entire row with a single character and color.
-fn fill_row(cells: &mut Vec<RenderableCell>, row: usize, cols: usize, c: char, fg: Rgba, bg: Rgba) {
+pub(crate) fn fill_row(
+    cells: &mut Vec<RenderableCell>,
+    row: usize,
+    cols: usize,
+    c: char,
+    fg: Rgba,
+    bg: Rgba,
+) {
     for col in 0..cols {
         cells.push(RenderableCell {
             row,
@@ -1000,7 +1049,7 @@ mod tests {
     #[test]
     fn test_render_basic() {
         let list = make_list();
-        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds(), &[]);
 
         assert_eq!(grid.rows, 15);
         assert_eq!(grid.cols, 25);
@@ -1011,7 +1060,7 @@ mod tests {
     #[test]
     fn test_session_entry_has_content() {
         let list = make_list();
-        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds(), &[]);
 
         // Row 0 = first entry (selected by default, no header)
         let entry_row: String = grid.cells[0..30].iter().map(|c| c.c).collect();
@@ -1022,7 +1071,7 @@ mod tests {
     #[test]
     fn test_selected_entry_highlighted() {
         let list = make_list();
-        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds(), &[]);
 
         // Row 0 (first entry) should have BG_SELECTED
         let row0_cell = &grid.cells[0];
@@ -1036,7 +1085,7 @@ mod tests {
     #[test]
     fn test_shell_entry_has_shell_label() {
         let list = make_list();
-        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 15, 25, 0, &make_agent_kinds(), &[]);
 
         // Row 1 = Shell entry
         let row1: String = grid.cells[25..50].iter().map(|c| c.c).collect();
@@ -1046,7 +1095,7 @@ mod tests {
     #[test]
     fn test_empty_list() {
         let list = SessionList::new();
-        let grid = render_session_list(&list, 10, 15, 0, &[]);
+        let grid = render_session_list(&list, 10, 15, 0, &[], &[]);
 
         assert_eq!(grid.rows, 10);
         assert_eq!(grid.cols, 15);
@@ -1056,7 +1105,7 @@ mod tests {
     #[test]
     fn test_narrow_cols() {
         let list = make_list();
-        let grid = render_session_list(&list, 10, 3, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 10, 3, 0, &make_agent_kinds(), &[]);
 
         assert_eq!(grid.cols, 3);
         assert_eq!(grid.cells.len(), 10 * 3);
@@ -1066,7 +1115,7 @@ mod tests {
     fn test_editing_mode_render() {
         let mut list = make_list();
         list.start_editing();
-        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds());
+        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds(), &[]);
 
         // Row 0 (editing) should have BG_SELECTED background
         assert_eq!(grid.cells[0].bg, BG_SELECTED);
@@ -1075,41 +1124,197 @@ mod tests {
         assert!(row0.contains("Backend"), "editing row: '{row0}'");
     }
 
-    // ── Header bar tests ───────────────────────────────────────────────────
+    // ── Git project grouping tests ──────────────────────────────────────────
 
     #[test]
-    fn test_header_bar_basic() {
-        let grid = render_header_bar(
-            60,
-            ViewMode::Focus,
-            Some("Backend"),
-            Some(AgentState::Thinking),
-            0,
+    fn test_build_display_plan_no_projects() {
+        let plan = build_display_plan(2, &[]);
+        assert_eq!(plan.len(), 2);
+        assert!(matches!(plan[0], DisplayRow::Entry(0)));
+        assert!(matches!(plan[1], DisplayRow::Entry(1)));
+    }
+
+    #[test]
+    fn test_build_display_plan_same_project() {
+        let projects = vec!["termesh".to_string(), "termesh".to_string()];
+        let plan = build_display_plan(2, &projects);
+        // Header + 2 entries
+        assert_eq!(plan.len(), 3);
+        assert!(matches!(&plan[0], DisplayRow::Header(p) if p == "termesh"));
+        assert!(matches!(plan[1], DisplayRow::Entry(0)));
+        assert!(matches!(plan[2], DisplayRow::Entry(1)));
+    }
+
+    #[test]
+    fn test_build_display_plan_different_projects() {
+        let projects = vec!["termesh".to_string(), "my-app".to_string()];
+        let plan = build_display_plan(2, &projects);
+        // Header + entry + header + entry
+        assert_eq!(plan.len(), 4);
+        assert!(matches!(&plan[0], DisplayRow::Header(p) if p == "termesh"));
+        assert!(matches!(plan[1], DisplayRow::Entry(0)));
+        assert!(matches!(&plan[2], DisplayRow::Header(p) if p == "my-app"));
+        assert!(matches!(plan[3], DisplayRow::Entry(1)));
+    }
+
+    #[test]
+    fn test_build_display_plan_mixed_with_empty() {
+        let projects = vec!["termesh".to_string(), String::new(), "termesh".to_string()];
+        let plan = build_display_plan(3, &projects);
+        // Header("termesh") + Entry(0) + Entry(1) + Header("termesh") + Entry(2)
+        assert_eq!(plan.len(), 5);
+        assert!(matches!(&plan[0], DisplayRow::Header(p) if p == "termesh"));
+        assert!(matches!(plan[1], DisplayRow::Entry(0)));
+        assert!(matches!(plan[2], DisplayRow::Entry(1))); // no header for empty
+        assert!(matches!(&plan[3], DisplayRow::Header(p) if p == "termesh"));
+        assert!(matches!(plan[4], DisplayRow::Entry(2)));
+    }
+
+    #[test]
+    fn test_grouped_render_header_row() {
+        let list = make_list();
+        let projects = vec!["termesh".to_string(), "termesh".to_string()];
+        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds(), &projects);
+
+        // Row 0 = header "  termesh   ..."
+        let row0: String = grid.cells[0..30].iter().map(|c| c.c).collect();
+        assert!(row0.contains("termesh"), "header row: '{row0}'");
+        assert!(
+            row0.starts_with("  termesh"),
+            "should start with '  termesh': '{row0}'"
         );
 
-        assert_eq!(grid.rows, 1);
-        assert_eq!(grid.cols, 60);
-        assert_eq!(grid.cells.len(), 60);
+        // Header should use FG_MUTED
+        assert_eq!(grid.cells[0].fg, FG_MUTED);
+        assert_eq!(grid.cells[0].bg, BG_SURFACE);
 
-        let text: String = grid.cells.iter().map(|c| c.c).collect();
-        assert!(text.contains("Backend"), "header: '{text}'");
-        assert!(text.contains("Thinking"), "header: '{text}'");
+        // Row 1 = first entry (selected, BG_SELECTED)
+        let row1: String = grid.cells[30..60].iter().map(|c| c.c).collect();
+        assert!(row1.contains("Backend"), "entry row: '{row1}'");
+        assert_eq!(grid.cells[30].bg, BG_SELECTED);
+
+        // Row 2 = second entry (not selected, BG_SURFACE)
+        let row2: String = grid.cells[60..90].iter().map(|c| c.c).collect();
+        assert!(row2.contains("Shell"), "entry row: '{row2}'");
+        assert_eq!(grid.cells[60].bg, BG_SURFACE);
     }
 
     #[test]
-    fn test_header_bar_no_session() {
-        let grid = render_header_bar(60, ViewMode::Split, None, None, 0);
+    fn test_grouped_render_multiple_projects() {
+        let mut list = SessionList::new();
+        list.add(SessionEntry {
+            id: SessionId(1),
+            label: "Backend".to_string(),
+            is_agent: true,
+            state: AgentState::Thinking,
+        });
+        list.add(SessionEntry {
+            id: SessionId(2),
+            label: "Frontend".to_string(),
+            is_agent: true,
+            state: AgentState::Idle,
+        });
+        let kinds = vec!["claude".to_string(), "claude".to_string()];
+        let projects = vec!["termesh".to_string(), "my-app".to_string()];
+        let grid = render_session_list(&list, 15, 30, 0, &kinds, &projects);
 
-        let text: String = grid.cells.iter().map(|c| c.c).collect();
-        assert!(text.contains("termesh"), "header: '{text}'");
+        // Row 0 = header "termesh"
+        let row0: String = grid.cells[0..30].iter().map(|c| c.c).collect();
+        assert!(row0.contains("termesh"), "header: '{row0}'");
+
+        // Row 1 = Backend entry
+        let row1: String = grid.cells[30..60].iter().map(|c| c.c).collect();
+        assert!(row1.contains("Backend"), "entry: '{row1}'");
+
+        // Row 2 = header "my-app"
+        let row2: String = grid.cells[60..90].iter().map(|c| c.c).collect();
+        assert!(row2.contains("my-app"), "header: '{row2}'");
+
+        // Row 3 = Frontend entry
+        let row3: String = grid.cells[90..120].iter().map(|c| c.c).collect();
+        assert!(row3.contains("Frontend"), "entry: '{row3}'");
     }
 
     #[test]
-    fn test_header_bar_primary_color() {
-        let grid = render_header_bar(60, ViewMode::Focus, Some("Test"), None, 0);
+    fn test_grouped_selection_after_header_offset() {
+        let mut list = make_list();
+        list.select_next(); // select entry index 1 (Shell)
+        let projects = vec!["termesh".to_string(), "termesh".to_string()];
+        let grid = render_session_list(&list, 15, 30, 0, &make_agent_kinds(), &projects);
 
-        // " " space at col 0, then "T" at col 2
-        assert_eq!(grid.cells[2].fg, FG_PRIMARY);
+        // Display plan: Header(row 0), Entry 0(row 1), Entry 1(row 2)
+        // Entry 0 (Backend) at row 1 should NOT be selected
+        assert_eq!(grid.cells[30].bg, BG_SURFACE);
+        // Entry 1 (Shell) at row 2 should be selected
+        assert_eq!(grid.cells[60].bg, BG_SELECTED);
+    }
+
+    // ── Scroll tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scroll_offset_no_scroll_needed() {
+        let plan = vec![
+            DisplayRow::Header("proj".to_string()),
+            DisplayRow::Entry(0),
+            DisplayRow::Entry(1),
+        ];
+        assert_eq!(compute_scroll_offset(&plan, 0, 5), 0);
+        assert_eq!(compute_scroll_offset(&plan, 1, 5), 0);
+    }
+
+    #[test]
+    fn test_scroll_offset_selected_below_viewport() {
+        // 4 entries with 2 headers = 6 display rows, viewport = 3
+        let plan = vec![
+            DisplayRow::Header("a".to_string()),
+            DisplayRow::Entry(0),
+            DisplayRow::Entry(1),
+            DisplayRow::Header("b".to_string()),
+            DisplayRow::Entry(2),
+            DisplayRow::Entry(3),
+        ];
+        // Entry 3 is at visual row 5, viewport = 3 → offset = 5 - 3 + 1 = 3
+        assert_eq!(compute_scroll_offset(&plan, 3, 3), 3);
+    }
+
+    #[test]
+    fn test_scroll_renders_selected_visible() {
+        // Create 4 entries in 2 projects, but only 3 rows of viewport
+        let mut list = SessionList::new();
+        for i in 0..4 {
+            list.add(SessionEntry {
+                id: SessionId(i as u64),
+                label: format!("S{i}"),
+                is_agent: true,
+                state: AgentState::Idle,
+            });
+        }
+        // Select last entry
+        list.select_next(); // 1
+        list.select_next(); // 2
+        list.select_next(); // 3
+
+        let kinds = vec![
+            "claude".into(),
+            "claude".into(),
+            "claude".into(),
+            "claude".into(),
+        ];
+        let projects = vec!["a".into(), "a".into(), "b".into(), "b".into()];
+        // Display plan: Header(a), E0, E1, Header(b), E2, E3 = 6 rows
+        // Viewport = 3 rows, selected = entry 3 (visual row 5)
+        let grid = render_session_list(&list, 3, 20, 0, &kinds, &projects);
+
+        // The selected entry (S3) must be visible somewhere in the 3-row viewport
+        let all_text: String = grid.cells.iter().map(|c| c.c).collect();
+        assert!(
+            all_text.contains("S3"),
+            "selected entry should be visible: '{all_text}'"
+        );
+
+        // And it should have BG_SELECTED
+        let has_selected_bg = grid.cells.iter().any(|c| c.bg == BG_SELECTED);
+        assert!(has_selected_bg, "selected entry should be highlighted");
     }
 
     // ── Status bar tests ───────────────────────────────────────────────────

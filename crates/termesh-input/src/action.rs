@@ -57,6 +57,10 @@ pub enum Action {
     SidePanelBack,
     /// Toggle between unified and side-by-side diff mode.
     ToggleDiffMode,
+    /// Cycle keyboard focus between SessionList, Terminal, and SidePanel.
+    CycleFocusRegion,
+    /// Open session picker to swap the focused pane's session (Split mode only).
+    SwapSession,
 }
 
 #[cfg(test)]

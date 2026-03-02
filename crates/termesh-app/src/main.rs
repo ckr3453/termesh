@@ -3,6 +3,7 @@ mod app;
 mod cli;
 #[allow(dead_code)]
 mod session_manager;
+mod session_picker;
 mod theme;
 mod ui_grid;
 
@@ -11,15 +12,17 @@ use app::App;
 use clap::Parser;
 use cli::{Cli, Command};
 use session_manager::SessionManager;
+use session_picker::{SessionPicker, SessionPickerEntry};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 use termesh_agent::preset::WorkspacePreset;
-use termesh_core::types::{AgentState, SplitLayout, ViewMode};
+use termesh_core::types::{AgentState, SessionId, SplitLayout, ViewMode};
 use termesh_diff::diff_generator::{DiffLine, DiffMode, SideBySideLine};
-use termesh_diff::history::{ChangeHistory, ChangedFile};
-use termesh_diff::watcher::{FileChangeKind, FileWatcher};
+use termesh_diff::git_changes::GitChangeTracker;
+use termesh_diff::history::ChangedFile;
 use termesh_input::action::Action;
-use termesh_layout::focus_layout::FocusLayout;
+use termesh_layout::focus_layout::{FocusLayout, FocusRegion};
 use termesh_layout::session_list::SessionEntry;
 use termesh_layout::split_layout::SplitLayoutManager;
 use termesh_platform::event_loop::{self, AppCallbacks, PlatformConfig};
@@ -64,12 +67,14 @@ struct TermeshCallbacks {
     diff_mode: DiffMode,
     /// Cached side-by-side diff lines.
     sbs_lines: Vec<SideBySideLine>,
-    /// File watcher for detecting workspace file changes.
-    file_watcher: Option<FileWatcher>,
-    /// File change history for diff generation.
-    change_history: ChangeHistory,
+    /// Per-session git change trackers.
+    git_trackers: HashMap<SessionId, GitChangeTracker>,
     /// Agent picker TUI (shown when no --agent flag).
     picker: Option<AgentPicker>,
+    /// Whether the agent picker should render full-screen (true) or inside a pane (false).
+    picker_fullscreen: bool,
+    /// Session picker overlay for swapping sessions in Split mode.
+    session_picker: Option<SessionPicker>,
     /// Current spinner frame index (0..9).
     spinner_frame: usize,
     /// Last time the spinner frame advanced.
@@ -78,7 +83,6 @@ struct TermeshCallbacks {
 
 impl TermeshCallbacks {
     fn new() -> Self {
-        let file_watcher = Self::start_watcher(None);
         Self {
             session_mgr: SessionManager::new(),
             layout: SplitLayoutManager::new(SplitLayout::Dual),
@@ -94,9 +98,10 @@ impl TermeshCallbacks {
             file_list_selected: 0,
             diff_mode: DiffMode::Unified,
             sbs_lines: Vec::new(),
-            file_watcher,
-            change_history: ChangeHistory::new(),
+            git_trackers: HashMap::new(),
             picker: None,
+            picker_fullscreen: false,
+            session_picker: None,
             spinner_frame: 0,
             last_spinner_tick: Instant::now(),
         }
@@ -114,34 +119,10 @@ impl TermeshCallbacks {
             _ => ViewMode::Split,
         };
 
-        // Use first pane's cwd as the watch root
-        let watch_root = preset
-            .panes
-            .first()
-            .and_then(|p| p.cwd.as_ref())
-            .map(PathBuf::from);
-        let file_watcher = Self::start_watcher(watch_root.as_deref());
-
         let mut callbacks = Self {
-            session_mgr: SessionManager::new(),
             layout: SplitLayoutManager::new(split),
-            focus_layout: FocusLayout::new(),
             view_mode,
-            window_size: (800, 600),
-            cell_size: (8.0, 16.0),
-            show_session_list: true,
-            diff_lines: Vec::new(),
-            side_panel_scroll: 0,
-            side_panel_view: SidePanelView::FileList,
-            changed_files: Vec::new(),
-            file_list_selected: 0,
-            diff_mode: DiffMode::Unified,
-            sbs_lines: Vec::new(),
-            file_watcher,
-            change_history: ChangeHistory::new(),
-            picker: None,
-            spinner_frame: 0,
-            last_spinner_tick: Instant::now(),
+            ..Self::new()
         };
 
         // For single-pane presets, close the extra pane created by Dual layout
@@ -210,6 +191,7 @@ impl TermeshCallbacks {
                     is_agent,
                     state: self.session_mgr.agent_state(session_id),
                 });
+                self.init_git_tracker(session_id);
             }
             Err(e) => {
                 log::error!(
@@ -220,22 +202,72 @@ impl TermeshCallbacks {
         }
     }
 
+    /// Create a new agent picker with folder paths pre-populated.
+    fn create_picker(&self) -> AgentPicker {
+        let mut folders = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            folders.push(cwd);
+        }
+        for tracker in self.git_trackers.values() {
+            let root = tracker.git_root().to_path_buf();
+            if !folders.contains(&root) {
+                folders.push(root);
+            }
+        }
+        let mut picker = AgentPicker::new();
+        picker.set_folders(folders);
+        picker
+    }
+
     /// Spawn an agent session by type (claude, codex, gemini, shell).
-    fn spawn_agent(&mut self, agent_type: &str) {
+    ///
+    /// Confirm the picker selection, spawn the agent, and clean up picker state.
+    fn finalize_picker_spawn(&mut self) {
+        let picker = match self.picker.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+        let agent_type = match picker.try_confirm() {
+            Some(a) => a.to_string(),
+            None => return,
+        };
+        let cwd = picker.selected_folder();
+        self.picker = None;
+        self.picker_fullscreen = false;
+        self.spawn_agent(&agent_type, cwd);
+        if self.view_mode == ViewMode::Split {
+            self.resize_split_panes();
+            self.show_picker_if_needed();
+        } else {
+            self.resize_focused_session();
+        }
+    }
+
+    /// If `cwd` is `Some`, the session starts in the given directory.
+    fn spawn_agent(&mut self, agent_type: &str, cwd: Option<PathBuf>) {
         let (command, args, label, _agent_kind, is_agent) = agent_picker::resolve_agent(agent_type);
 
-        // In Split mode, bind to the focused pane; otherwise use pane[0].
-        let target_pane_id = if self.view_mode == ViewMode::Split {
-            self.layout.layout().focused_pane().id
-        } else {
-            self.layout.layout().panes()[0].id
+        // Determine which pane to bind:
+        // - Focus mode: always bind to pane[0] (the single visible pane)
+        // - Split mode with empty focused pane: bind to focused pane
+        // - Split mode with occupied focused pane: don't bind (session added to list only)
+        let target_pane_id = match self.view_mode {
+            ViewMode::Focus => Some(self.layout.layout().panes()[0].id),
+            ViewMode::Split => {
+                let focused = self.layout.layout().focused_pane();
+                if focused.session_id.is_none() {
+                    Some(focused.id)
+                } else {
+                    None
+                }
+            }
         };
 
         let config = SessionConfig {
             name: label.clone(),
             command,
             args,
-            cwd: None,
+            cwd,
             agent: if is_agent {
                 agent_type.to_string()
             } else {
@@ -246,7 +278,9 @@ impl TermeshCallbacks {
 
         match self.session_mgr.spawn(config) {
             Ok(session_id) => {
-                self.layout.bind_session(target_pane_id, session_id);
+                if let Some(pane_id) = target_pane_id {
+                    self.layout.bind_session(pane_id, session_id);
+                }
                 self.focus_layout.sessions_mut().add(SessionEntry {
                     id: session_id,
                     label,
@@ -257,6 +291,7 @@ impl TermeshCallbacks {
                         AgentState::None
                     },
                 });
+                self.init_git_tracker(session_id);
             }
             Err(e) => {
                 log::error!("failed to spawn agent session: {e}");
@@ -293,6 +328,36 @@ impl TermeshCallbacks {
         }
     }
 
+    /// Fill empty split panes with unbound sessions.
+    ///
+    /// Collects session IDs already bound to panes, then assigns unbound
+    /// sessions to empty panes in order.
+    fn rebind_split_panes(&mut self) {
+        let bound: HashSet<SessionId> = self
+            .layout
+            .layout()
+            .panes()
+            .iter()
+            .filter_map(|p| p.session_id)
+            .collect();
+        let unbound: Vec<SessionId> = self
+            .focus_layout
+            .sessions()
+            .entries()
+            .iter()
+            .filter(|e| !bound.contains(&e.id))
+            .map(|e| e.id)
+            .collect();
+        let mut unbound_iter = unbound.into_iter();
+        for pane in self.layout.layout().panes().to_vec() {
+            if pane.session_id.is_none() {
+                if let Some(sid) = unbound_iter.next() {
+                    self.layout.bind_session(pane.id, sid);
+                }
+            }
+        }
+    }
+
     /// Show the agent picker if there are empty panes (Split mode).
     fn show_picker_if_needed(&mut self) {
         if self.view_mode == ViewMode::Split && self.has_empty_panes() {
@@ -306,8 +371,72 @@ impl TermeshCallbacks {
             {
                 self.layout.focus_index(idx);
             }
-            self.picker = Some(AgentPicker::new());
+            self.picker = Some(self.create_picker());
         }
+    }
+
+    /// Build a SessionPicker with all sessions and their pane bindings.
+    fn create_session_picker(&self) -> SessionPicker {
+        let entries = self.focus_layout.sessions().entries();
+        let panes = self.layout.layout().panes();
+        let current_session = self.layout.layout().focused_pane().session_id;
+
+        let picker_entries: Vec<SessionPickerEntry> = entries
+            .iter()
+            .map(|e| {
+                let pane_index = panes.iter().position(|p| p.session_id == Some(e.id));
+                SessionPickerEntry {
+                    id: e.id,
+                    label: e.label.clone(),
+                    agent_kind: self.session_mgr.agent_kind(e.id).to_string(),
+                    pane_index,
+                }
+            })
+            .collect();
+
+        SessionPicker::new(picker_entries, current_session)
+    }
+
+    /// Swap the focused pane's session with the given target session.
+    ///
+    /// - If target is already in another pane → exchange the two panes' sessions.
+    /// - If target is unbound → bind it to the focused pane.
+    /// - If target is already in the focused pane → no-op.
+    fn swap_session_to_focused_pane(&mut self, target_id: SessionId) {
+        let focused_pane_id = self.layout.layout().focused_pane().id;
+        let focused_session = self.layout.layout().focused_pane().session_id;
+
+        // No-op if already the same
+        if focused_session == Some(target_id) {
+            return;
+        }
+
+        // Find which pane has the target session
+        let target_pane_id = self
+            .layout
+            .layout()
+            .panes()
+            .iter()
+            .find(|p| p.session_id == Some(target_id))
+            .map(|p| p.id);
+
+        // Exchange: move focused session to the target's pane
+        if let Some(other_pane_id) = target_pane_id {
+            if let Some(fs) = focused_session {
+                self.layout.bind_session(other_pane_id, fs);
+            } else {
+                for pane in self.layout.layout_mut().panes_mut() {
+                    if pane.id == other_pane_id {
+                        pane.unbind_session();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Bind target to focused pane
+        self.layout.bind_session(focused_pane_id, target_id);
+        self.resize_split_panes();
     }
 
     /// Sync agent states from SessionManager to FocusLayout's session list.
@@ -317,6 +446,10 @@ impl TermeshCallbacks {
             self.focus_layout
                 .sessions_mut()
                 .update_state(session_id, state);
+            let is_agent = self.session_mgr.is_agent(session_id);
+            self.focus_layout
+                .sessions_mut()
+                .update_is_agent(session_id, is_agent);
         }
     }
 
@@ -334,31 +467,26 @@ impl TermeshCallbacks {
     /// - Split: if the session is already visible in a pane, focus that pane;
     ///   otherwise, replace the current pane's session with the target.
     fn select_session_by_index(&mut self, index: usize) {
-        let entries = self.focus_layout.sessions().entries().to_vec();
-        let target_id = match entries.get(index).map(|e| e.id) {
-            Some(id) => id,
-            None => return,
-        };
-
         match self.view_mode {
             ViewMode::Focus => {
+                let entries = self.focus_layout.sessions().entries().to_vec();
+                let target_id = match entries.get(index).map(|e| e.id) {
+                    Some(id) => id,
+                    None => return,
+                };
                 self.focus_layout.sessions_mut().select_by_id(target_id);
                 self.resize_focused_session();
             }
             ViewMode::Split => {
-                // Check if target session is already visible in a pane
+                // In Split mode, Ctrl+1~9 focuses the pane at that position
                 let panes = self.layout.layout().panes().to_vec();
-                if let Some(pane_idx) = panes.iter().position(|p| p.session_id == Some(target_id)) {
-                    // Already visible → just move focus
-                    self.layout.focus_index(pane_idx);
-                } else {
-                    // Not visible → replace current pane's session
-                    let focused_pane_id = self.layout.layout().focused_pane().id;
-                    self.layout.bind_session(focused_pane_id, target_id);
-                    self.resize_split_panes();
+                if index < panes.len() {
+                    self.layout.focus_index(index);
+                    // Sync session list selection with the pane's session
+                    if let Some(sid) = panes[index].session_id {
+                        self.focus_layout.sessions_mut().select_by_id(sid);
+                    }
                 }
-                // Keep session list selection in sync
-                self.focus_layout.sessions_mut().select_by_id(target_id);
             }
         }
     }
@@ -419,64 +547,35 @@ impl TermeshCallbacks {
         }
     }
 
-    /// Start a FileWatcher on the given path, or current directory if None.
-    fn start_watcher(root: Option<&std::path::Path>) -> Option<FileWatcher> {
-        let path = match root {
-            Some(p) => p.to_path_buf(),
-            None => std::env::current_dir().unwrap_or_default(),
-        };
-        if !path.is_dir() {
-            return None;
-        }
-        match FileWatcher::new(&path) {
-            Ok(w) => {
-                log::info!("file watcher started: {}", path.display());
-                Some(w)
-            }
-            Err(e) => {
-                log::warn!("failed to start file watcher: {e}");
-                None
+    /// Initialize a git change tracker for a session.
+    fn init_git_tracker(&mut self, session_id: SessionId) {
+        if let Some(cwd) = self.session_mgr.session_cwd(session_id) {
+            if let Some(tracker) = GitChangeTracker::new(cwd) {
+                self.git_trackers.insert(session_id, tracker);
             }
         }
     }
 
-    /// Poll file watcher for changes and update the changed files list and diff.
-    fn poll_file_changes(&mut self) {
-        let watcher = match &self.file_watcher {
-            Some(w) => w,
+    /// Poll git trackers for the active session and update the changed files list.
+    fn poll_git_changes(&mut self) {
+        let active_id = match self.focused_session() {
+            Some(id) => id,
             None => return,
         };
 
-        let changes = watcher.drain();
-        if changes.is_empty() {
-            return;
-        }
-
-        let mut updated = false;
-        for change in changes {
-            match change.kind {
-                FileChangeKind::Created | FileChangeKind::Modified => {
-                    if self.change_history.record_change(&change.path) {
-                        updated = true;
-                    }
-                }
-                FileChangeKind::Removed => {
-                    // Skip removed files for diff display
-                }
-            }
-        }
+        let updated = match self.git_trackers.get_mut(&active_id) {
+            Some(tracker) => tracker.poll(),
+            None => return,
+        };
 
         if updated {
-            // Rebuild changed files list
-            self.changed_files = self.change_history.changed_files();
-            // Clamp selection index
+            self.changed_files = self.git_trackers[&active_id].changed_files().to_vec();
             if !self.changed_files.is_empty() {
                 self.file_list_selected = self.file_list_selected.min(self.changed_files.len() - 1);
             } else {
                 self.file_list_selected = 0;
             }
 
-            // If viewing a specific file's diff, refresh it
             if self.side_panel_view == SidePanelView::FileDiff {
                 self.refresh_selected_diff();
             }
@@ -489,20 +588,20 @@ impl TermeshCallbacks {
 
         self.diff_lines.clear();
         self.sbs_lines.clear();
-        if let Some(file) = self.changed_files.get(self.file_list_selected) {
-            let initial = self
-                .change_history
-                .initial_content(&file.path)
-                .unwrap_or("");
-            let current = self
-                .change_history
-                .current_content(&file.path)
-                .unwrap_or("");
 
-            if let Some(diff) = self.change_history.diff_for_file(&file.path) {
-                self.diff_lines = diff.lines;
+        let active_id = match self.focused_session() {
+            Some(id) => id,
+            None => return,
+        };
+
+        if let Some(file) = self.changed_files.get(self.file_list_selected) {
+            if let Some(tracker) = self.git_trackers.get(&active_id) {
+                if let Some((old, new)) = tracker.file_diff(&file.path) {
+                    let diff = termesh_diff::diff_generator::diff_texts(&old, &new);
+                    self.diff_lines = diff.lines;
+                    self.sbs_lines = side_by_side_diff(&old, &new);
+                }
             }
-            self.sbs_lines = side_by_side_diff(initial, current);
         }
     }
 }
@@ -555,35 +654,105 @@ impl AppCallbacks for TermeshCallbacks {
             return;
         }
 
-        // Picker mode: arrow keys navigate, Enter confirms
+        // Picker mode: two-stage input handling
+        let mut picker_spawn = false;
         if let Some(picker) = &mut self.picker {
-            match text {
-                b"\x1b[A" => picker.select_prev(), // Arrow Up
-                b"\x1b[B" => picker.select_next(), // Arrow Down
-                b"\x1b" => {
-                    // Escape: cancel picker (only if sessions exist)
-                    if !self.session_mgr.is_empty() {
-                        self.picker = None;
-                    }
-                }
-                b"\r" => {
-                    if let Some(agent_type) = picker.try_confirm() {
-                        let agent_type = agent_type.to_string();
-                        self.picker = None;
-                        self.spawn_agent(&agent_type);
-                        if self.view_mode == ViewMode::Split {
-                            // Resize the newly bound pane
-                            self.resize_split_panes();
-                            // Still empty panes? Show picker again.
-                            self.show_picker_if_needed();
-                        } else {
-                            self.resize_focused_session();
+            if picker.is_custom_input() {
+                // Custom path input mode
+                match text {
+                    b"\x1b" => picker.cancel_custom_input(),
+                    b"\x7f" | b"\x08" => picker.handle_backspace(),
+                    b"\r" => picker_spawn = true,
+                    _ => {
+                        if let Ok(s) = std::str::from_utf8(text) {
+                            for c in s.chars() {
+                                if !c.is_control() {
+                                    picker.handle_char_input(c);
+                                }
+                            }
                         }
                     }
-                    // If try_confirm() returned None, error_message is set and
-                    // the picker stays visible so the user can pick another option.
+                }
+                if picker_spawn {
+                    self.finalize_picker_spawn();
+                }
+                return;
+            }
+
+            if picker.is_folder_stage() {
+                // Folder selection mode
+                match text {
+                    b"\x1b[A" => picker.select_prev(),
+                    b"\x1b[B" => picker.select_next(),
+                    b"\x1b" => picker.go_back(),
+                    b"\r" => picker_spawn = true,
+                    _ => {}
+                }
+                if picker_spawn {
+                    self.finalize_picker_spawn();
+                    return;
+                }
+            } else {
+                // Agent selection mode
+                match text {
+                    b"\x1b[A" => picker.select_prev(),
+                    b"\x1b[B" => picker.select_next(),
+                    b"\x1b" => {
+                        if !self.session_mgr.is_empty() {
+                            self.picker = None;
+                            self.picker_fullscreen = false;
+                        }
+                    }
+                    b"\r" => {
+                        // try_confirm transitions to SelectFolder, returns None
+                        picker.try_confirm();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Session picker mode (swap session in Split mode)
+        if let Some(sp) = &mut self.session_picker {
+            match text {
+                b"\x1b[A" => sp.select_prev(),
+                b"\x1b[B" => sp.select_next(),
+                b"\x1b" => {
+                    self.session_picker = None;
+                }
+                b"\r" => {
+                    if let Some(target_id) = sp.confirm() {
+                        self.session_picker = None;
+                        self.swap_session_to_focused_pane(target_id);
+                    }
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        // SessionList focus mode: arrow keys navigate, Enter selects, Escape exits
+        if self.view_mode == ViewMode::Focus
+            && self.focus_layout.focus_region() == FocusRegion::SessionList
+        {
+            match text {
+                b"\x1b[A" => {
+                    self.focus_layout.sessions_mut().select_prev();
+                    self.resize_focused_session();
+                }
+                b"\x1b[B" => {
+                    self.focus_layout.sessions_mut().select_next();
+                    self.resize_focused_session();
+                }
+                b"\r" => {
+                    self.resize_focused_session();
+                    self.focus_layout.set_focus(FocusRegion::Terminal);
+                }
+                b"\x1b" => {
+                    self.focus_layout.set_focus(FocusRegion::Terminal);
+                }
+                _ => {} // ignore other input while session list is focused
             }
             return;
         }
@@ -620,6 +789,11 @@ impl AppCallbacks for TermeshCallbacks {
             return;
         }
 
+        // Session picker mode: block other actions
+        if self.session_picker.is_some() {
+            return;
+        }
+
         match action {
             Action::SplitHorizontal | Action::SplitVertical => {
                 // Switch to Dual split (or Quad if already Dual)
@@ -643,13 +817,15 @@ impl AppCallbacks for TermeshCallbacks {
                         if let Some(sid) = self.focus_layout.sessions().selected_id() {
                             self.session_mgr.remove(sid);
                             self.focus_layout.sessions_mut().remove(sid);
+                            self.git_trackers.remove(&sid);
                             for pane in self.layout.layout_mut().panes_mut() {
                                 if pane.session_id == Some(sid) {
                                     pane.unbind_session();
                                 }
                             }
                             if self.focus_layout.sessions().is_empty() {
-                                self.picker = Some(AgentPicker::new());
+                                self.picker = Some(self.create_picker());
+                                self.picker_fullscreen = true;
                             } else {
                                 self.resize_focused_session();
                             }
@@ -714,9 +890,10 @@ impl AppCallbacks for TermeshCallbacks {
                 self.resize_focused_session();
             }
             Action::SpawnSession => {
-                // Show agent picker instead of spawning a shell directly
+                // Show agent picker full-screen
                 log::info!("SpawnSession → opening agent picker");
-                self.picker = Some(AgentPicker::new());
+                self.picker = Some(self.create_picker());
+                self.picker_fullscreen = true;
             }
             Action::ToggleSidePanel => {
                 if self.view_mode == ViewMode::Focus {
@@ -803,6 +980,19 @@ impl AppCallbacks for TermeshCallbacks {
                     self.side_panel_scroll = 0;
                 }
             }
+            Action::CycleFocusRegion => {
+                if self.view_mode == ViewMode::Focus {
+                    self.focus_layout.cycle_focus();
+                }
+            }
+            Action::SwapSession => {
+                if self.view_mode == ViewMode::Split {
+                    let sp = self.create_session_picker();
+                    if !sp.is_empty() {
+                        self.session_picker = Some(sp);
+                    }
+                }
+            }
             Action::Copy | Action::Paste => { /* handled by platform layer */ }
         }
     }
@@ -810,9 +1000,9 @@ impl AppCallbacks for TermeshCallbacks {
     fn on_tick(&mut self) -> Vec<(GridSnapshot, f32, f32)> {
         use termesh_layout::focus_layout::{HEADER_HEIGHT, STATUS_HEIGHT};
 
-        // Initial picker (no sessions yet): full-screen overlay
-        if let Some(picker) = self.picker.as_ref() {
-            if self.session_mgr.is_empty() {
+        // Full-screen picker (no sessions or Ctrl+N): render over entire screen
+        if self.picker_fullscreen && self.session_mgr.is_empty() {
+            if let Some(picker) = self.picker.as_ref() {
                 let (screen_w, screen_h) = self.window_size;
                 let (cell_w, cell_h) = self.cell_size;
                 let cols = (screen_w as f32 / cell_w).floor() as usize;
@@ -826,6 +1016,7 @@ impl AppCallbacks for TermeshCallbacks {
         if !exited.is_empty() {
             for &sid in &exited {
                 self.focus_layout.sessions_mut().remove(sid);
+                self.git_trackers.remove(&sid);
                 // Unbind from any pane that had this session
                 for pane in self.layout.layout_mut().panes_mut() {
                     if pane.session_id == Some(sid) {
@@ -837,13 +1028,16 @@ impl AppCallbacks for TermeshCallbacks {
             // After removal: ensure we have a valid selection or show picker
             if self.focus_layout.sessions().is_empty() {
                 // No sessions left → show agent picker
-                self.picker = Some(AgentPicker::new());
+                self.picker = Some(self.create_picker());
+                self.picker_fullscreen = true;
             } else {
                 // Resize the newly selected session (select_index auto-clamped)
                 self.resize_focused_session();
-                // In Split mode, re-sync pane bindings
+                // In Split mode, fill empty panes with remaining sessions
                 if self.view_mode == ViewMode::Split {
+                    self.rebind_split_panes();
                     self.resize_split_panes();
+                    self.show_picker_if_needed();
                 }
             }
         }
@@ -864,8 +1058,8 @@ impl AppCallbacks for TermeshCallbacks {
             }
         }
 
-        // Poll file watcher for changes and update diff
-        self.poll_file_changes();
+        // Poll git trackers for changes and update diff
+        self.poll_git_changes();
 
         let (screen_w, screen_h) = self.window_size;
         let (cell_w, cell_h) = self.cell_size;
@@ -878,22 +1072,6 @@ impl AppCallbacks for TermeshCallbacks {
         let regions = self
             .focus_layout
             .compute_regions_with_bars(screen_w, screen_h, header_px, status_px);
-
-        // ── Header bar ──
-        {
-            let (session_label, agent_state) = match self.focus_layout.sessions().selected_entry() {
-                Some(entry) => (Some(entry.label.as_str()), Some(entry.state)),
-                None => (None, None),
-            };
-            let header_grid = ui_grid::render_header_bar(
-                total_cols,
-                self.view_mode,
-                session_label,
-                agent_state,
-                self.spinner_frame,
-            );
-            grids.push((header_grid, 0.0, 0.0));
-        }
 
         // ── Status bar ──
         {
@@ -918,12 +1096,29 @@ impl AppCallbacks for TermeshCallbacks {
                     .iter()
                     .map(|e| self.session_mgr.agent_kind(e.id).to_string())
                     .collect();
+                let git_projects: Vec<String> = self
+                    .focus_layout
+                    .sessions()
+                    .entries()
+                    .iter()
+                    .map(|e| {
+                        self.git_trackers
+                            .get(&e.id)
+                            .and_then(|t| {
+                                t.git_root()
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
                 let list_grid = ui_grid::render_session_list(
                     self.focus_layout.sessions(),
                     list_rows,
                     list_cols,
                     self.spinner_frame,
                     &agent_kinds,
+                    &git_projects,
                 );
                 grids.push((list_grid, list_rect.x as f32, list_rect.y as f32));
             }
@@ -965,6 +1160,20 @@ impl AppCallbacks for TermeshCallbacks {
         // Terminal grids in center region
         let terminal_rect = regions.terminal;
 
+        // Agent picker full-screen (Ctrl+N or no sessions)
+        if self.picker_fullscreen {
+            if let Some(picker) = &self.picker {
+                let picker_cols = (terminal_rect.width as f32 / cell_w).floor() as usize;
+                let picker_rows = (terminal_rect.height as f32 / cell_h).floor() as usize;
+                grids.push((
+                    picker.render(picker_rows, picker_cols),
+                    terminal_rect.x as f32,
+                    terminal_rect.y as f32,
+                ));
+                return grids;
+            }
+        }
+
         match self.view_mode {
             ViewMode::Focus => {
                 if let Some(picker) = &self.picker {
@@ -989,7 +1198,7 @@ impl AppCallbacks for TermeshCallbacks {
             ViewMode::Split => {
                 // Split mode: render pane header + terminal for each visible pane
                 let focused_pane_id = self.layout.layout().focused_pane().id;
-                for pane in self.layout.layout().panes() {
+                for (pane_idx, pane) in self.layout.layout().panes().iter().enumerate() {
                     if !self.layout.is_pane_visible(pane.id) {
                         continue;
                     }
@@ -998,7 +1207,7 @@ impl AppCallbacks for TermeshCallbacks {
                     let pane_y = terminal_rect.y as f32 + rect.y as f32;
                     let is_focused = pane.id == focused_pane_id;
 
-                    // Show picker inside focused pane if active
+                    // Show agent picker inside focused pane if active (non-fullscreen)
                     if let Some(picker) = self.picker.as_ref() {
                         if is_focused {
                             let pane_cols = (rect.width as f32 / cell_w).floor() as usize;
@@ -1008,15 +1217,26 @@ impl AppCallbacks for TermeshCallbacks {
                         }
                     }
 
+                    // Show session picker inside focused pane if active
+                    if let Some(sp) = self.session_picker.as_ref() {
+                        if is_focused {
+                            let pane_cols = (rect.width as f32 / cell_w).floor() as usize;
+                            let pane_rows = (rect.height as f32 / cell_h).floor() as usize;
+                            grids.push((sp.render(pane_rows, pane_cols), pane_x, pane_y));
+                            continue;
+                        }
+                    }
+
                     if let Some(session_id) = pane.session_id {
-                        // Pane header
-                        let entries = self.focus_layout.sessions().entries();
-                        let (label, session_index) = entries
+                        // Pane header — use pane position index, not session list index
+                        let label = self
+                            .focus_layout
+                            .sessions()
+                            .entries()
                             .iter()
-                            .enumerate()
-                            .find(|(_, e)| e.id == session_id)
-                            .map(|(i, e)| (e.label.as_str(), i))
-                            .unwrap_or(("???", 0));
+                            .find(|e| e.id == session_id)
+                            .map(|e| e.label.as_str())
+                            .unwrap_or("???");
                         let state = self.session_mgr.agent_state(session_id);
                         let agent_kind = self.session_mgr.agent_kind(session_id);
                         let pane_cols = (rect.width as f32 / cell_w).floor() as usize;
@@ -1027,13 +1247,18 @@ impl AppCallbacks for TermeshCallbacks {
                             is_focused,
                             pane_cols,
                             self.spinner_frame,
-                            session_index,
+                            pane_idx,
                         );
                         grids.push((pane_header, pane_x, pane_y));
 
                         // Terminal content (offset by 1 row for header)
                         if let Some(terminal) = self.session_mgr.terminal(session_id) {
-                            grids.push((terminal.render_grid(), pane_x, pane_y + cell_h));
+                            let mut grid = terminal.render_grid();
+                            // Hide cursor in non-focused panes
+                            if !is_focused || self.session_picker.is_some() {
+                                grid.cursor.visible = false;
+                            }
+                            grids.push((grid, pane_x, pane_y + cell_h));
                         }
                     }
                 }
@@ -1293,10 +1518,11 @@ fn main() {
 
             if let Some(agent_type) = cli.agent {
                 // --agent flag: spawn the specified agent directly
-                callbacks.spawn_agent(&agent_type);
+                callbacks.spawn_agent(&agent_type, None);
             } else {
                 // No --agent flag: show agent picker TUI
-                callbacks.picker = Some(AgentPicker::new());
+                callbacks.picker = Some(callbacks.create_picker());
+                callbacks.picker_fullscreen = true;
             }
 
             (app, callbacks)

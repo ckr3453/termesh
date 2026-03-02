@@ -5,6 +5,7 @@ use crate::claude_code::ClaudeCodeAdapter;
 use crate::codex_cli::CodexCliAdapter;
 use crate::gemini_cli::GeminiCliAdapter;
 use std::collections::HashMap;
+use termesh_core::types::AgentState;
 
 /// Registry that maps agent identifiers to their adapter implementations.
 ///
@@ -47,6 +48,18 @@ impl AdapterRegistry {
         let mut ids: Vec<&str> = self.adapters.keys().map(|s| s.as_str()).collect();
         ids.sort();
         ids
+    }
+
+    /// Try analyzing output against all registered adapters.
+    ///
+    /// Returns `(adapter_id, state)` for the first adapter that detects a state.
+    pub fn try_analyze_all(&self, output: &str) -> Option<(&str, AgentState)> {
+        for (id, adapter) in &self.adapters {
+            if let Some(state) = adapter.analyze_output(output) {
+                return Some((id.as_str(), state));
+            }
+        }
+        None
     }
 
     /// Check if a command matches any registered agent adapter.
