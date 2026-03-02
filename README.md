@@ -1,8 +1,8 @@
 ```
- _                                 _
-| |_  ___  _ _  _ __   ___  ___  | |_
-|  _|/ -_)| '_|| '  \ / -_)(_-<  | ' \
- \__|\___||_|  |_|_|_|\___||__/  |_||_|
+ _                              _
+| |_  ___  _ _  _ __   ___  ___| |_
+|  _|/ -_)| '_|| '  \ / -_)(_-<| ' \
+ \__|\___||_|  |_|_|_|\___||__/|_||_|
 ```
 
 # Termesh
@@ -16,7 +16,8 @@ Run multiple AI coding agents (Claude Code, Codex, Gemini) side by side in a sin
 - **Multi-agent orchestration** — Run Claude, Codex, Gemini, or plain shell sessions simultaneously
 - **Focus / Split mode** — Single session view or multi-pane split layout, toggle with `Ctrl+Enter`
 - **Agent state detection** — Automatically detects Idle, Thinking, Tool Use, Error states from PTY output
-- **Live diff panel** — Side panel shows real-time file changes from agent activity
+- **Session swap** — Swap sessions between panes with a visual picker (`Ctrl+S`)
+- **Live diff panel** — Side panel shows git-based real-time file changes per session
 - **Session management** — Create, switch, rename, and close sessions with keyboard shortcuts
 - **GPU-accelerated rendering** — wgpu-based renderer with CJK and emoji fallback fonts
 - **Cross-platform** — Windows, macOS (Intel & Apple Silicon), Linux
@@ -70,6 +71,7 @@ termesh --agent shell
 | `Ctrl+]` | Next session |
 | `Ctrl+R` | Rename session |
 | `Ctrl+B` | Toggle session list |
+| `Ctrl+S` | Swap session in pane (Split mode) |
 
 ### Layout
 
@@ -78,16 +80,18 @@ termesh --agent shell
 | `Ctrl+Enter` | Toggle Focus / Split mode |
 | `Ctrl+T` | Split horizontal |
 | `Ctrl+Shift+T` | Split vertical |
+| `Ctrl+1`~`4` | Focus pane N (Split mode) |
 
 ### Side Panel (Focus mode)
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+E` | Toggle diff panel |
+| `Ctrl+D` | Toggle diff mode (Unified / Side-by-side) |
 | `Ctrl+Shift+Up` | Scroll up |
 | `Ctrl+Shift+Down` | Scroll down |
-| `Ctrl+Shift+]` | Next tab |
-| `Ctrl+Shift+[` | Previous tab |
+| `Ctrl+Shift+Enter` | Select file / Enter diff |
+| `Ctrl+Shift+[` | Back to file list |
 
 ### Clipboard
 
@@ -107,7 +111,7 @@ termesh/
 ├── termesh-layout      # Pane split, focus/split layout
 ├── termesh-input       # Keybinding, input handling
 ├── termesh-agent       # Agent adapters, state detection
-├── termesh-diff        # File watcher, diff generation
+├── termesh-diff        # Git change tracking, diff generation
 ├── termesh-platform    # Platform-specific native layer (winit)
 └── termesh-app         # App entry point, event loop
 ```
