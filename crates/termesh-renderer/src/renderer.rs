@@ -80,8 +80,8 @@ impl Renderer {
             })
             .await
         {
-            Some(adapter) => adapter,
-            None => {
+            Ok(adapter) => adapter,
+            Err(_) => {
                 log::warn!("no hardware GPU adapter found, trying software fallback");
                 instance
                     .request_adapter(&wgpu::RequestAdapterOptions {
@@ -90,7 +90,7 @@ impl Renderer {
                         force_fallback_adapter: true,
                     })
                     .await
-                    .ok_or(termesh_core::error::RenderError::GpuInitFailed {
+                    .map_err(|_| termesh_core::error::RenderError::GpuInitFailed {
                         reason: "no compatible GPU adapter found (hardware or software)"
                             .to_string(),
                     })?
@@ -105,19 +105,16 @@ impl Renderer {
             info.device_type
         );
 
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("termesh"),
-                    required_features: wgpu::Features::empty(),
-                    // Use downlevel defaults for broader compatibility across
-                    // different GPU backends (integrated GPUs, older hardware).
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
-                    ..Default::default()
-                },
-                None,
-            )
+        let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("termesh"),
+                required_features: wgpu::Features::empty(),
+                // Use downlevel defaults for broader compatibility across
+                // different GPU backends (integrated GPUs, older hardware).
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                    .using_resolution(adapter.limits()),
+                ..Default::default()
+            })
             .await
             .map_err(|e| termesh_core::error::RenderError::GpuInitFailed {
                 reason: format!("device request failed: {e}"),
@@ -665,6 +662,7 @@ impl Renderer {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 ..Default::default()
