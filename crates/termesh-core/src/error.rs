@@ -21,7 +21,7 @@ pub enum TermeshError {
 /// Errors related to configuration loading and parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("config file not found: {path}")]
+    #[error("config file not found")]
     NotFound { path: PathBuf },
 
     #[error("failed to parse config: {source}")]
@@ -39,6 +39,9 @@ pub enum ConfigError {
 pub enum PtyError {
     #[error("failed to spawn PTY process: {reason}")]
     SpawnFailed { reason: String },
+
+    #[error("failed to spawn thread: {reason}")]
+    ThreadSpawnFailed { reason: String },
 
     #[error("session not found: {0}")]
     SessionNotFound(crate::types::SessionId),

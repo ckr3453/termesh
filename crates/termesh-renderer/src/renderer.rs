@@ -17,9 +17,14 @@ struct CellInstance {
     uv_size: [f32; 2],
     glyph_offset: [f32; 2],
     glyph_size: [f32; 2],
-    has_glyph: f32,
-    _padding: f32,
+    /// 0.0 = bg-only, 1.0 = bitmap glyph, 2.0 = MSDF glyph.
+    glyph_mode: f32,
+    /// MSDF screen pixel range for edge sharpness. 0.0 for bitmap.
+    msdf_px_range: f32,
 }
+
+/// MSDF range in distance-field pixels (must match font.rs MSDF_RANGE).
+const MSDF_RANGE: f32 = 4.0;
 
 /// Uniform buffer data.
 #[repr(C)]
@@ -46,6 +51,10 @@ pub struct Renderer {
     height: u32,
     /// Frame counter for cursor blink (toggles every ~30 frames at 60fps = 0.5s).
     frame_count: u32,
+    /// Reusable per-frame buffers to avoid allocation every frame.
+    bg_buf: Vec<CellInstance>,
+    glyph_buf: Vec<CellInstance>,
+    cursor_buf: Vec<CellInstance>,
 }
 
 impl Renderer {
@@ -209,9 +218,11 @@ impl Renderer {
 
         // Atlas texture bind group
         let atlas_view = atlas_texture.create_view(&Default::default());
+        // Linear filtering: required for MSDF distance interpolation.
+        // Bitmap glyphs still work because the shader reads alpha directly.
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -303,6 +314,11 @@ impl Renderer {
                     offset: 80,
                     shader_location: 8,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 84,
+                    shader_location: 9,
+                },
             ],
         };
 
@@ -390,6 +406,9 @@ impl Renderer {
             width,
             height,
             frame_count: 0,
+            bg_buf: Vec::new(),
+            glyph_buf: Vec::new(),
+            cursor_buf: Vec::new(),
         })
     }
 
@@ -443,16 +462,16 @@ impl Renderer {
         self.frame_count = self.frame_count.wrapping_add(1);
         let cursor_visible = (self.frame_count / 30).is_multiple_of(2);
 
-        let mut bg_instances = Vec::new();
-        let mut glyph_instances = Vec::new();
-        let mut cursor_instances = Vec::new();
+        self.bg_buf.clear();
+        self.glyph_buf.clear();
+        self.cursor_buf.clear();
 
         for &(grid, x_offset, y_offset) in grids {
             // Add cursor block if visible
             if cursor_visible && grid.cursor.visible {
                 let cx = x_offset + grid.cursor.col as f32 * metrics.cell_width;
                 let cy = y_offset + grid.cursor.row as f32 * metrics.cell_height;
-                cursor_instances.push(CellInstance {
+                self.cursor_buf.push(CellInstance {
                     cell_pos: [cx, cy],
                     cell_size: [metrics.cell_width, metrics.cell_height],
                     fg_color: [0.0, 0.0, 0.0, 1.0],
@@ -461,8 +480,8 @@ impl Renderer {
                     uv_size: [0.0, 0.0],
                     glyph_offset: [0.0, 0.0],
                     glyph_size: [0.0, 0.0],
-                    has_glyph: 0.0,
-                    _padding: 0.0,
+                    glyph_mode: 0.0,
+                    msdf_px_range: 0.0,
                 });
             }
 
@@ -512,7 +531,7 @@ impl Renderer {
                     (cell.fg.to_f32_array(), cell.bg.to_f32_array())
                 };
 
-                bg_instances.push(CellInstance {
+                self.bg_buf.push(CellInstance {
                     cell_pos: [x, y],
                     cell_size: [bg_w, bg_h],
                     fg_color: fg,
@@ -521,73 +540,93 @@ impl Renderer {
                     uv_size: [0.0, 0.0],
                     glyph_offset: [0.0, 0.0],
                     glyph_size: [0.0, 0.0],
-                    has_glyph: 0.0,
-                    _padding: 0.0,
+                    glyph_mode: 0.0,
+                    msdf_px_range: 0.0,
                 });
 
                 if cell.c != ' ' && cell.c != '\0' {
                     if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
                         if glyph.width > 0 && glyph.height > 0 {
-                            let gw = glyph.width as f32;
-                            let gh = glyph.height as f32;
-
-                            // Log first occurrence of non-ASCII chars for debugging
-                            if cell.c as u32 > 127 && self.frame_count < 5 {
-                                log::info!(
-                                    "GLYPH '{}' u+{:04X}: glyph={}x{} wide={} spacer={} \
-                                     cell_w={:.1} cell_h={:.1} bg={}x{} primary={}",
-                                    cell.c,
-                                    cell.c as u32,
-                                    glyph.width,
-                                    glyph.height,
-                                    cell.wide,
-                                    cell.spacer,
-                                    glyph_cell_w,
-                                    glyph_cell_h,
-                                    bg_w,
-                                    bg_h,
-                                    self.font.font.has_glyph(cell.c),
-                                );
-                            }
-
-                            // Clamp oversized glyphs (CJK/emoji from fallback fonts)
-                            let scale = (glyph_cell_w / gw).min(glyph_cell_h / gh).min(1.0);
-                            let gw = gw * scale;
-                            let gh = gh * scale;
-
-                            // Primary font glyphs: baseline-aligned positioning
-                            // Fallback font glyphs: center-aligned (different
-                            // baseline metrics make cross-font baseline unreliable)
-                            let from_primary = self.font.font.has_glyph(cell.c);
-                            let (glyph_x, glyph_y) = if from_primary && scale >= 1.0 {
-                                let gx = glyph.bearing_x.round();
-                                let glyph_top = glyph.bearing_y + gh;
-                                let gy = (metrics.baseline - glyph_top).round();
-                                (gx, gy)
+                            if glyph.is_msdf {
+                                // MSDF glyph: render full cell quad, shader computes distance
+                                let px_range =
+                                    (glyph_cell_h / self.font.msdf_cell_size() as f32) * MSDF_RANGE;
+                                self.glyph_buf.push(CellInstance {
+                                    cell_pos: [x, y],
+                                    cell_size: [bg_w, bg_h],
+                                    fg_color: fg,
+                                    bg_color: bg,
+                                    uv_offset: [
+                                        glyph.atlas_x as f32 / atlas_w,
+                                        glyph.atlas_y as f32 / atlas_h,
+                                    ],
+                                    uv_size: [
+                                        glyph.width as f32 / atlas_w,
+                                        glyph.height as f32 / atlas_h,
+                                    ],
+                                    glyph_offset: [0.0, 0.0],
+                                    glyph_size: [glyph_cell_w, glyph_cell_h],
+                                    glyph_mode: 2.0,
+                                    msdf_px_range: px_range,
+                                });
                             } else {
-                                let gx = ((glyph_cell_w - gw) / 2.0).round();
-                                let gy = ((glyph_cell_h - gh) / 2.0).round();
-                                (gx, gy)
-                            };
+                                // Bitmap glyph: per-pixel positioning
+                                let gw = glyph.width as f32;
+                                let gh = glyph.height as f32;
 
-                            glyph_instances.push(CellInstance {
-                                cell_pos: [x, y],
-                                cell_size: [bg_w, bg_h],
-                                fg_color: fg,
-                                bg_color: bg,
-                                uv_offset: [
-                                    glyph.atlas_x as f32 / atlas_w,
-                                    glyph.atlas_y as f32 / atlas_h,
-                                ],
-                                uv_size: [
-                                    glyph.width as f32 / atlas_w,
-                                    glyph.height as f32 / atlas_h,
-                                ],
-                                glyph_offset: [glyph_x, glyph_y],
-                                glyph_size: [gw, gh],
-                                has_glyph: 1.0,
-                                _padding: 0.0,
-                            });
+                                if cell.c as u32 > 127 && self.frame_count < 5 {
+                                    log::info!(
+                                        "GLYPH '{}' u+{:04X}: glyph={}x{} wide={} spacer={} \
+                                         cell_w={:.1} cell_h={:.1} bg={}x{} primary={}",
+                                        cell.c,
+                                        cell.c as u32,
+                                        glyph.width,
+                                        glyph.height,
+                                        cell.wide,
+                                        cell.spacer,
+                                        glyph_cell_w,
+                                        glyph_cell_h,
+                                        bg_w,
+                                        bg_h,
+                                        self.font.font.has_glyph(cell.c),
+                                    );
+                                }
+
+                                let scale = (glyph_cell_w / gw).min(glyph_cell_h / gh).min(1.0);
+                                let gw = gw * scale;
+                                let gh = gh * scale;
+
+                                let from_primary = self.font.font.has_glyph(cell.c);
+                                let (glyph_x, glyph_y) = if from_primary && scale >= 1.0 {
+                                    let gx = glyph.bearing_x.round();
+                                    let glyph_top = glyph.bearing_y + gh;
+                                    let gy = (metrics.baseline - glyph_top).round();
+                                    (gx, gy)
+                                } else {
+                                    let gx = ((glyph_cell_w - gw) / 2.0).round();
+                                    let gy = ((glyph_cell_h - gh) / 2.0).round();
+                                    (gx, gy)
+                                };
+
+                                self.glyph_buf.push(CellInstance {
+                                    cell_pos: [x, y],
+                                    cell_size: [bg_w, bg_h],
+                                    fg_color: fg,
+                                    bg_color: bg,
+                                    uv_offset: [
+                                        glyph.atlas_x as f32 / atlas_w,
+                                        glyph.atlas_y as f32 / atlas_h,
+                                    ],
+                                    uv_size: [
+                                        glyph.width as f32 / atlas_w,
+                                        glyph.height as f32 / atlas_h,
+                                    ],
+                                    glyph_offset: [glyph_x, glyph_y],
+                                    glyph_size: [gw, gh],
+                                    glyph_mode: 1.0,
+                                    msdf_px_range: 0.0,
+                                });
+                            }
                         }
                     }
                 }
@@ -623,16 +662,16 @@ impl Renderer {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("bg_instances"),
-                contents: bytemuck::cast_slice(&bg_instances),
+                contents: bytemuck::cast_slice(&self.bg_buf),
                 usage: wgpu::BufferUsages::VERTEX,
             });
 
-        let glyph_buffer = if !glyph_instances.is_empty() {
+        let glyph_buffer = if !self.glyph_buf.is_empty() {
             Some(
                 self.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("glyph_instances"),
-                        contents: bytemuck::cast_slice(&glyph_instances),
+                        contents: bytemuck::cast_slice(&self.glyph_buf),
                         usage: wgpu::BufferUsages::VERTEX,
                     }),
             )
@@ -673,28 +712,28 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             render_pass.set_vertex_buffer(0, bg_buffer.slice(..));
-            render_pass.draw(0..4, 0..bg_instances.len() as u32);
+            render_pass.draw(0..4, 0..self.bg_buf.len() as u32);
 
             // Pass 2: glyphs
             if let Some(ref buf) = glyph_buffer {
                 render_pass.set_pipeline(&self.glyph_pipeline);
                 render_pass.set_vertex_buffer(0, buf.slice(..));
-                render_pass.draw(0..4, 0..glyph_instances.len() as u32);
+                render_pass.draw(0..4, 0..self.glyph_buf.len() as u32);
             }
 
             // Pass 3: cursor overlay (uses bg_pipeline with alpha blending via glyph_pipeline)
-            if !cursor_instances.is_empty() {
+            if !self.cursor_buf.is_empty() {
                 let cursor_buffer =
                     self.device
                         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("cursor_instances"),
-                            contents: bytemuck::cast_slice(&cursor_instances),
+                            contents: bytemuck::cast_slice(&self.cursor_buf),
                             usage: wgpu::BufferUsages::VERTEX,
                         });
                 // Use glyph_pipeline for alpha blending, fs_background just returns bg_color
                 render_pass.set_pipeline(&self.bg_pipeline);
                 render_pass.set_vertex_buffer(0, cursor_buffer.slice(..));
-                render_pass.draw(0..4, 0..cursor_instances.len() as u32);
+                render_pass.draw(0..4, 0..self.cursor_buf.len() as u32);
             }
 
             // Pass 4: pane dividers
@@ -717,8 +756,8 @@ impl Renderer {
                             uv_size: [0.0, 0.0],
                             glyph_offset: [0.0, 0.0],
                             glyph_size: [0.0, 0.0],
-                            has_glyph: 0.0,
-                            _padding: 0.0,
+                            glyph_mode: 0.0,
+                            msdf_px_range: 0.0,
                         }
                     })
                     .collect();

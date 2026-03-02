@@ -91,7 +91,9 @@ impl LicenseStore {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(&self.path, perms);
+            if let Err(e) = std::fs::set_permissions(&self.path, perms) {
+                log::warn!("failed to set credentials file permissions: {e}");
+            }
         }
 
         Ok(())

@@ -118,7 +118,7 @@ impl SessionManager {
         let terminal = Terminal::new(rows as usize, cols as usize, DEFAULT_SCROLLBACK);
 
         // Start the background reader thread
-        let (_handle, mut output_rx) = session.start_reader();
+        let (_handle, mut output_rx) = session.start_reader()?;
         let event_tx = self.event_tx.clone();
         let session_id = id;
 

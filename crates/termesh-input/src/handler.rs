@@ -167,8 +167,9 @@ fn parse_action(s: &str) -> Option<Action> {
         "togglesessionlist" => Some(Action::ToggleSessionList),
         "sidepanelscrollup" => Some(Action::SidePanelScrollUp),
         "sidepanelscrolldown" => Some(Action::SidePanelScrollDown),
-        "sidepanelnexttab" => Some(Action::SidePanelNextTab),
-        "sidepanelprevtab" => Some(Action::SidePanelPrevTab),
+        "sidepanelselect" => Some(Action::SidePanelSelect),
+        "sidepanelback" => Some(Action::SidePanelBack),
+        "togglediffmode" => Some(Action::ToggleDiffMode),
         _ => None,
     }
 }
@@ -329,13 +330,11 @@ action = "ClosePane"
             Some(Action::SidePanelScrollDown)
         );
         assert_eq!(
-            parse_action("SidePanelNextTab"),
-            Some(Action::SidePanelNextTab)
+            parse_action("SidePanelSelect"),
+            Some(Action::SidePanelSelect)
         );
-        assert_eq!(
-            parse_action("SidePanelPrevTab"),
-            Some(Action::SidePanelPrevTab)
-        );
+        assert_eq!(parse_action("SidePanelBack"), Some(Action::SidePanelBack));
+        assert_eq!(parse_action("ToggleDiffMode"), Some(Action::ToggleDiffMode));
         assert_eq!(parse_action("Unknown"), None);
     }
 

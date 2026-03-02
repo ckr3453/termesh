@@ -51,10 +51,12 @@ pub enum Action {
     SidePanelScrollUp,
     /// Scroll side panel down.
     SidePanelScrollDown,
-    /// Switch to the next side panel tab.
-    SidePanelNextTab,
-    /// Switch to the previous side panel tab.
-    SidePanelPrevTab,
+    /// Select the highlighted item in the side panel file list.
+    SidePanelSelect,
+    /// Go back from file diff view to file list view.
+    SidePanelBack,
+    /// Toggle between unified and side-by-side diff mode.
+    ToggleDiffMode,
 }
 
 #[cfg(test)]

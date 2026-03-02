@@ -111,8 +111,6 @@ pub enum SplitLayout {
 #[serde(rename_all = "lowercase")]
 pub enum SidePanelTab {
     Diff,
-    Preview,
-    TestLog,
 }
 
 #[cfg(test)]

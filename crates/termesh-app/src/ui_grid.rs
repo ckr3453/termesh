@@ -3,7 +3,8 @@
 
 use crate::theme::*;
 use termesh_core::types::{AgentState, ViewMode, SPINNER_FRAMES};
-use termesh_diff::diff_generator::{DiffLine, DiffTag};
+use termesh_diff::diff_generator::{DiffLine, DiffTag, SideBySideLine};
+use termesh_diff::history::ChangedFile;
 use termesh_layout::session_list::SessionList;
 use termesh_layout::side_panel::SidePanel;
 use termesh_terminal::grid::{CursorState, GridSnapshot, RenderableCell};
@@ -538,6 +539,334 @@ pub fn render_side_panel(
     }
 }
 
+// ── Side-by-side diff ─────────────────────────────────────────────────────
+
+/// Render a side-by-side diff into a GridSnapshot.
+///
+/// Layout:
+/// ```text
+/// Row 0: " Changes (side-by-side)"
+/// Row 1+: left_half │ right_half
+/// ```
+pub fn render_side_by_side(
+    _panel: &SidePanel,
+    sbs_lines: &[SideBySideLine],
+    rows: usize,
+    cols: usize,
+    scroll_offset: usize,
+) -> GridSnapshot {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let mut cells = Vec::with_capacity(rows * cols);
+
+    // Row 0: title
+    let title = " Changes (side-by-side)";
+    let title_chars: Vec<char> = title.chars().collect();
+    for col_idx in 0..cols {
+        let c = title_chars.get(col_idx).copied().unwrap_or(' ');
+        let fg = if col_idx < title_chars.len() {
+            FG_SECONDARY
+        } else {
+            FG_MUTED
+        };
+        cells.push(RenderableCell {
+            row: 0,
+            col: col_idx,
+            c,
+            fg,
+            bg: BG_ELEVATED,
+            ..Default::default()
+        });
+    }
+
+    let content_rows = rows.saturating_sub(1);
+    // Split: left half + divider + right half
+    let half = cols.saturating_sub(1) / 2;
+    let div_col = half;
+
+    if sbs_lines.is_empty() {
+        let msg = "No changes";
+        let msg_chars: Vec<char> = msg.chars().collect();
+        let center_row = content_rows / 2;
+        let center_col = cols.saturating_sub(msg_chars.len()) / 2;
+
+        for content_row in 0..content_rows {
+            let row_idx = content_row + 1;
+            for col_idx in 0..cols {
+                if content_row == center_row
+                    && col_idx >= center_col
+                    && col_idx - center_col < msg_chars.len()
+                {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col: col_idx,
+                        c: msg_chars[col_idx - center_col],
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
+                } else {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col: col_idx,
+                        c: ' ',
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    } else {
+        for content_row in 0..content_rows {
+            let row_idx = content_row + 1;
+            let line_idx = scroll_offset + content_row;
+
+            if let Some(sbs) = sbs_lines.get(line_idx) {
+                let left_text = sbs.left.as_deref().unwrap_or("");
+                let right_text = sbs.right.as_deref().unwrap_or("");
+                let left_chars: Vec<char> = left_text.trim_end_matches('\n').chars().collect();
+                let right_chars: Vec<char> = right_text.trim_end_matches('\n').chars().collect();
+
+                let (left_fg, right_fg) = match sbs.tag {
+                    DiffTag::Equal => (FG_SECONDARY, FG_SECONDARY),
+                    DiffTag::Delete => (DIFF_DEL, DIFF_ADD),
+                    DiffTag::Insert => (FG_MUTED, DIFF_ADD),
+                };
+
+                for col_idx in 0..cols {
+                    if col_idx == div_col {
+                        // Divider column
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c: '\u{2502}', // │
+                            fg: FG_MUTED,
+                            bg: BG_SURFACE,
+                            ..Default::default()
+                        });
+                    } else if col_idx < div_col {
+                        // Left half
+                        let c = left_chars.get(col_idx).copied().unwrap_or(' ');
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c,
+                            fg: left_fg,
+                            bg: BG_SURFACE,
+                            ..Default::default()
+                        });
+                    } else {
+                        // Right half
+                        let right_idx = col_idx - div_col - 1;
+                        let c = right_chars.get(right_idx).copied().unwrap_or(' ');
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c,
+                            fg: right_fg,
+                            bg: BG_SURFACE,
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                fill_row(&mut cells, row_idx, cols, ' ', FG_SECONDARY, BG_SURFACE);
+            }
+        }
+    }
+
+    GridSnapshot {
+        cells,
+        rows,
+        cols,
+        cursor: CursorState {
+            row: 0,
+            col: 0,
+            visible: false,
+        },
+        selection: None,
+    }
+}
+
+// ── File list (side panel) ─────────────────────────────────────────────────
+
+/// Render the side panel file list into a GridSnapshot.
+///
+/// Layout:
+/// ```text
+/// Row 0: " Changes (N files)"
+/// Row 1+: " M path/to/file.rs         +5 -2"
+/// ```
+/// Selected row uses `BG_SELECTED` background.
+pub fn render_file_list(
+    _panel: &SidePanel,
+    files: &[ChangedFile],
+    selected: usize,
+    rows: usize,
+    cols: usize,
+) -> GridSnapshot {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let mut cells = Vec::with_capacity(rows * cols);
+
+    // Row 0: title
+    let title = if files.is_empty() {
+        " Changes".to_string()
+    } else {
+        format!(" Changes ({} files)", files.len())
+    };
+    let title_chars: Vec<char> = title.chars().collect();
+    for col_idx in 0..cols {
+        let c = title_chars.get(col_idx).copied().unwrap_or(' ');
+        let fg = if col_idx < title_chars.len() {
+            FG_SECONDARY
+        } else {
+            FG_MUTED
+        };
+        cells.push(RenderableCell {
+            row: 0,
+            col: col_idx,
+            c,
+            fg,
+            bg: BG_ELEVATED,
+            ..Default::default()
+        });
+    }
+
+    let content_rows = rows.saturating_sub(1);
+
+    if files.is_empty() {
+        let msg = "No changes";
+        let msg_chars: Vec<char> = msg.chars().collect();
+        let center_row = content_rows / 2;
+        let center_col = cols.saturating_sub(msg_chars.len()) / 2;
+
+        for content_row in 0..content_rows {
+            let row_idx = content_row + 1;
+            for col_idx in 0..cols {
+                if content_row == center_row
+                    && col_idx >= center_col
+                    && col_idx - center_col < msg_chars.len()
+                {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col: col_idx,
+                        c: msg_chars[col_idx - center_col],
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
+                } else {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col: col_idx,
+                        c: ' ',
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    } else {
+        for content_row in 0..content_rows {
+            let row_idx = content_row + 1;
+            let is_selected = content_row < files.len() && content_row == selected;
+            let bg = if is_selected { BG_SELECTED } else { BG_SURFACE };
+
+            if let Some(file) = files.get(content_row) {
+                // Format: " M path/to/file.rs       +5 -2"
+                let filename = file
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| file.path.to_string_lossy().to_string());
+
+                let status_fg = match file.status {
+                    'A' => DIFF_ADD,
+                    'M' => STATUS_WAITING,
+                    _ => FG_SECONDARY,
+                };
+
+                // Right side: colored stats segments
+                let add_str = format!("+{}", file.insertions);
+                let del_str = format!("-{}", file.deletions);
+                // Build (char, color) pairs for right side
+                let mut right_parts: Vec<(char, Rgba)> = Vec::new();
+                for c in add_str.chars() {
+                    right_parts.push((c, DIFF_ADD));
+                }
+                right_parts.push((' ', FG_MUTED));
+                for c in del_str.chars() {
+                    right_parts.push((c, DIFF_DEL));
+                }
+                let stats_start = cols.saturating_sub(right_parts.len() + 1);
+
+                // Left side: " M filename"
+                let left = format!(" {} {}", file.status, filename);
+                let left_chars: Vec<char> = left.chars().collect();
+
+                for col_idx in 0..cols {
+                    if col_idx == 1 {
+                        // Status character
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c: file.status,
+                            fg: status_fg,
+                            bg,
+                            ..Default::default()
+                        });
+                    } else if col_idx < left_chars.len() && col_idx < stats_start {
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c: left_chars[col_idx],
+                            fg: FG_PRIMARY,
+                            bg,
+                            ..Default::default()
+                        });
+                    } else if col_idx >= stats_start && col_idx - stats_start < right_parts.len() {
+                        let (c, fg) = right_parts[col_idx - stats_start];
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c,
+                            fg,
+                            bg,
+                            ..Default::default()
+                        });
+                    } else {
+                        cells.push(RenderableCell {
+                            row: row_idx,
+                            col: col_idx,
+                            c: ' ',
+                            fg: FG_MUTED,
+                            bg,
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                fill_row(&mut cells, row_idx, cols, ' ', FG_MUTED, BG_SURFACE);
+            }
+        }
+    }
+
+    GridSnapshot {
+        cells,
+        rows,
+        cols,
+        cursor: CursorState {
+            row: 0,
+            col: 0,
+            visible: false,
+        },
+        selection: None,
+    }
+}
+
 // ── Private helpers ────────────────────────────────────────────────────────
 
 /// Fill an entire row with a single character and color.
@@ -924,5 +1253,188 @@ mod tests {
         for row in 1..10 {
             assert_eq!(grid.cells[row * 20].c, ' ');
         }
+    }
+
+    // ── File list tests ───────────────────────────────────────────────────
+
+    fn make_changed_files() -> Vec<ChangedFile> {
+        vec![
+            ChangedFile {
+                path: std::path::PathBuf::from("src/main.rs"),
+                status: 'M',
+                insertions: 5,
+                deletions: 2,
+            },
+            ChangedFile {
+                path: std::path::PathBuf::from("src/lib.rs"),
+                status: 'A',
+                insertions: 10,
+                deletions: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_file_list_basic() {
+        let panel = make_panel();
+        let files = make_changed_files();
+        let grid = render_file_list(&panel, &files, 0, 10, 40);
+
+        assert_eq!(grid.rows, 10);
+        assert_eq!(grid.cols, 40);
+        assert_eq!(grid.cells.len(), 10 * 40);
+    }
+
+    #[test]
+    fn test_file_list_title() {
+        let panel = make_panel();
+        let files = make_changed_files();
+        let grid = render_file_list(&panel, &files, 0, 10, 40);
+
+        let header: String = grid.cells[..40].iter().map(|c| c.c).collect();
+        assert!(header.contains("Changes"), "header: '{header}'");
+        assert!(header.contains("2 files"), "header: '{header}'");
+    }
+
+    #[test]
+    fn test_file_list_selected_highlighted() {
+        let panel = make_panel();
+        let files = make_changed_files();
+        let grid = render_file_list(&panel, &files, 0, 10, 40);
+
+        // Row 1 (selected=0) should have BG_SELECTED
+        let row1_cell = &grid.cells[40];
+        assert_eq!(row1_cell.bg, BG_SELECTED);
+
+        // Row 2 (not selected) should have BG_SURFACE
+        let row2_cell = &grid.cells[80];
+        assert_eq!(row2_cell.bg, BG_SURFACE);
+    }
+
+    #[test]
+    fn test_file_list_status_chars() {
+        let panel = make_panel();
+        let files = make_changed_files();
+        let grid = render_file_list(&panel, &files, 0, 10, 40);
+
+        // Row 1, col 1 should be 'M'
+        assert_eq!(grid.cells[40 + 1].c, 'M');
+        // Row 2, col 1 should be 'A'
+        assert_eq!(grid.cells[80 + 1].c, 'A');
+    }
+
+    #[test]
+    fn test_file_list_empty() {
+        let panel = make_panel();
+        let grid = render_file_list(&panel, &[], 0, 10, 40);
+
+        let all_text: String = grid.cells.iter().map(|c| c.c).collect();
+        assert!(
+            all_text.contains("No changes"),
+            "expected 'No changes': '{all_text}'"
+        );
+    }
+
+    #[test]
+    fn test_file_list_contains_filename() {
+        let panel = make_panel();
+        let files = make_changed_files();
+        let grid = render_file_list(&panel, &files, 0, 10, 40);
+
+        let row1: String = grid.cells[40..80].iter().map(|c| c.c).collect();
+        assert!(row1.contains("main.rs"), "row1: '{row1}'");
+    }
+
+    // ── Side-by-side diff tests ───────────────────────────────────────────
+
+    fn make_sbs_lines() -> Vec<SideBySideLine> {
+        vec![
+            SideBySideLine {
+                left: Some("fn main() {\n".to_string()),
+                right: Some("fn main() {\n".to_string()),
+                tag: DiffTag::Equal,
+            },
+            SideBySideLine {
+                left: Some("    old_line();\n".to_string()),
+                right: Some("    new_line();\n".to_string()),
+                tag: DiffTag::Delete, // modification
+            },
+            SideBySideLine {
+                left: Some("}\n".to_string()),
+                right: Some("}\n".to_string()),
+                tag: DiffTag::Equal,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_sbs_basic() {
+        let panel = make_panel();
+        let sbs = make_sbs_lines();
+        let grid = render_side_by_side(&panel, &sbs, 10, 40, 0);
+
+        assert_eq!(grid.rows, 10);
+        assert_eq!(grid.cols, 40);
+        assert_eq!(grid.cells.len(), 10 * 40);
+    }
+
+    #[test]
+    fn test_sbs_title() {
+        let panel = make_panel();
+        let grid = render_side_by_side(&panel, &[], 5, 40, 0);
+
+        let header: String = grid.cells[..40].iter().map(|c| c.c).collect();
+        assert!(header.contains("side-by-side"), "header: '{header}'");
+    }
+
+    #[test]
+    fn test_sbs_divider() {
+        let panel = make_panel();
+        let sbs = make_sbs_lines();
+        let grid = render_side_by_side(&panel, &sbs, 10, 40, 0);
+
+        // Divider at col 19 (half of 39)
+        let div_col = (40 - 1) / 2;
+        // Row 1 (first content row)
+        let div_cell = &grid.cells[40 + div_col];
+        assert_eq!(div_cell.c, '\u{2502}'); // │
+    }
+
+    #[test]
+    fn test_sbs_equal_both_sides() {
+        let panel = make_panel();
+        let sbs = make_sbs_lines();
+        let grid = render_side_by_side(&panel, &sbs, 10, 40, 0);
+
+        // Row 1: equal line — both sides should have FG_SECONDARY
+        let left_cell = &grid.cells[40]; // col 0
+        assert_eq!(left_cell.fg, FG_SECONDARY);
+    }
+
+    #[test]
+    fn test_sbs_modification_colors() {
+        let panel = make_panel();
+        let sbs = make_sbs_lines();
+        let grid = render_side_by_side(&panel, &sbs, 10, 40, 0);
+
+        let div_col = (40 - 1) / 2;
+        // Row 2: modification — left DIFF_DEL, right DIFF_ADD
+        let left_cell = &grid.cells[2 * 40]; // col 0
+        assert_eq!(left_cell.fg, DIFF_DEL);
+
+        let right_cell = &grid.cells[2 * 40 + div_col + 1]; // first right col
+        assert_eq!(right_cell.fg, DIFF_ADD);
+    }
+
+    #[test]
+    fn test_sbs_empty_shows_message() {
+        let panel = make_panel();
+        let grid = render_side_by_side(&panel, &[], 5, 30, 0);
+
+        let all_text: String = grid.cells.iter().map(|c| c.c).collect();
+        assert!(
+            all_text.contains("No changes"),
+            "expected 'No changes': '{all_text}'"
+        );
     }
 }

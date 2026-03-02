@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 use termesh_agent::preset::WorkspacePreset;
 use termesh_core::types::{AgentState, SplitLayout, ViewMode};
-use termesh_diff::diff_generator::{self, DiffLine};
-use termesh_diff::history::ChangeHistory;
+use termesh_diff::diff_generator::{DiffLine, DiffMode, SideBySideLine};
+use termesh_diff::history::{ChangeHistory, ChangedFile};
 use termesh_diff::watcher::{FileChangeKind, FileWatcher};
 use termesh_input::action::Action;
 use termesh_layout::focus_layout::FocusLayout;
@@ -25,6 +25,15 @@ use termesh_layout::split_layout::SplitLayoutManager;
 use termesh_platform::event_loop::{self, AppCallbacks, PlatformConfig};
 use termesh_pty::session::SessionConfig;
 use termesh_terminal::grid::GridSnapshot;
+
+/// Which view the side panel is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidePanelView {
+    /// File list showing all changed files.
+    FileList,
+    /// Diff view for a specific file.
+    FileDiff,
+}
 
 /// Bridges the platform event loop to the session manager.
 #[allow(dead_code)]
@@ -45,6 +54,16 @@ struct TermeshCallbacks {
     diff_lines: Vec<DiffLine>,
     /// Scroll offset for the side panel diff view.
     side_panel_scroll: usize,
+    /// Current side panel view mode.
+    side_panel_view: SidePanelView,
+    /// Cached list of changed files for the file list.
+    changed_files: Vec<ChangedFile>,
+    /// Selected index in the file list.
+    file_list_selected: usize,
+    /// Current diff display mode.
+    diff_mode: DiffMode,
+    /// Cached side-by-side diff lines.
+    sbs_lines: Vec<SideBySideLine>,
     /// File watcher for detecting workspace file changes.
     file_watcher: Option<FileWatcher>,
     /// File change history for diff generation.
@@ -70,6 +89,11 @@ impl TermeshCallbacks {
             show_session_list: true,
             diff_lines: Vec::new(),
             side_panel_scroll: 0,
+            side_panel_view: SidePanelView::FileList,
+            changed_files: Vec::new(),
+            file_list_selected: 0,
+            diff_mode: DiffMode::Unified,
+            sbs_lines: Vec::new(),
             file_watcher,
             change_history: ChangeHistory::new(),
             picker: None,
@@ -108,6 +132,11 @@ impl TermeshCallbacks {
             show_session_list: true,
             diff_lines: Vec::new(),
             side_panel_scroll: 0,
+            side_panel_view: SidePanelView::FileList,
+            changed_files: Vec::new(),
+            file_list_selected: 0,
+            diff_mode: DiffMode::Unified,
+            sbs_lines: Vec::new(),
             file_watcher,
             change_history: ChangeHistory::new(),
             picker: None,
@@ -411,7 +440,7 @@ impl TermeshCallbacks {
         }
     }
 
-    /// Poll file watcher for changes and update diff_lines.
+    /// Poll file watcher for changes and update the changed files list and diff.
     fn poll_file_changes(&mut self) {
         let watcher = match &self.file_watcher {
             Some(w) => w,
@@ -438,14 +467,42 @@ impl TermeshCallbacks {
         }
 
         if updated {
-            // Rebuild diff_lines from the most recent change
-            self.diff_lines.clear();
-            for record in self.change_history.recent(1) {
-                if let Some(old) = &record.old_content {
-                    let diff = diff_generator::diff_texts(old, &record.new_content);
-                    self.diff_lines = diff.lines;
-                }
+            // Rebuild changed files list
+            self.changed_files = self.change_history.changed_files();
+            // Clamp selection index
+            if !self.changed_files.is_empty() {
+                self.file_list_selected = self.file_list_selected.min(self.changed_files.len() - 1);
+            } else {
+                self.file_list_selected = 0;
             }
+
+            // If viewing a specific file's diff, refresh it
+            if self.side_panel_view == SidePanelView::FileDiff {
+                self.refresh_selected_diff();
+            }
+        }
+    }
+
+    /// Refresh diff_lines and sbs_lines for the currently selected file.
+    fn refresh_selected_diff(&mut self) {
+        use termesh_diff::diff_generator::side_by_side_diff;
+
+        self.diff_lines.clear();
+        self.sbs_lines.clear();
+        if let Some(file) = self.changed_files.get(self.file_list_selected) {
+            let initial = self
+                .change_history
+                .initial_content(&file.path)
+                .unwrap_or("");
+            let current = self
+                .change_history
+                .current_content(&file.path)
+                .unwrap_or("");
+
+            if let Some(diff) = self.change_history.diff_for_file(&file.path) {
+                self.diff_lines = diff.lines;
+            }
+            self.sbs_lines = side_by_side_diff(initial, current);
         }
     }
 }
@@ -665,6 +722,7 @@ impl AppCallbacks for TermeshCallbacks {
                 if self.view_mode == ViewMode::Focus {
                     self.focus_layout.toggle_side_panel();
                     self.side_panel_scroll = 0;
+                    self.side_panel_view = SidePanelView::FileList;
                     self.resize_focused_session();
                 }
             }
@@ -685,23 +743,64 @@ impl AppCallbacks for TermeshCallbacks {
             }
             Action::SidePanelScrollUp => {
                 if self.focus_layout.side_panel().is_visible() {
-                    self.side_panel_scroll = self.side_panel_scroll.saturating_sub(5);
+                    match self.side_panel_view {
+                        SidePanelView::FileList => {
+                            self.file_list_selected = self.file_list_selected.saturating_sub(1);
+                        }
+                        SidePanelView::FileDiff => {
+                            self.side_panel_scroll = self.side_panel_scroll.saturating_sub(5);
+                        }
+                    }
                 }
             }
             Action::SidePanelScrollDown => {
                 if self.focus_layout.side_panel().is_visible() {
-                    let max = self.diff_lines.len().saturating_sub(1);
-                    self.side_panel_scroll = (self.side_panel_scroll + 5).min(max);
+                    match self.side_panel_view {
+                        SidePanelView::FileList => {
+                            if !self.changed_files.is_empty() {
+                                self.file_list_selected =
+                                    (self.file_list_selected + 1).min(self.changed_files.len() - 1);
+                            }
+                        }
+                        SidePanelView::FileDiff => {
+                            let max = match self.diff_mode {
+                                DiffMode::Unified => self.diff_lines.len(),
+                                DiffMode::SideBySide => self.sbs_lines.len(),
+                            }
+                            .saturating_sub(1);
+                            self.side_panel_scroll = (self.side_panel_scroll + 5).min(max);
+                        }
+                    }
                 }
             }
-            Action::SidePanelNextTab => {
-                if self.focus_layout.side_panel().is_visible() {
-                    self.focus_layout.side_panel_mut().next_tab();
+            Action::SidePanelSelect => {
+                if self.focus_layout.side_panel().is_visible()
+                    && self.side_panel_view == SidePanelView::FileList
+                    && !self.changed_files.is_empty()
+                {
+                    self.side_panel_view = SidePanelView::FileDiff;
+                    self.side_panel_scroll = 0;
+                    self.refresh_selected_diff();
                 }
             }
-            Action::SidePanelPrevTab => {
-                if self.focus_layout.side_panel().is_visible() {
-                    self.focus_layout.side_panel_mut().prev_tab();
+            Action::SidePanelBack => {
+                if self.focus_layout.side_panel().is_visible()
+                    && self.side_panel_view == SidePanelView::FileDiff
+                {
+                    self.side_panel_view = SidePanelView::FileList;
+                    self.diff_lines.clear();
+                    self.sbs_lines.clear();
+                }
+            }
+            Action::ToggleDiffMode => {
+                if self.focus_layout.side_panel().is_visible()
+                    && self.side_panel_view == SidePanelView::FileDiff
+                {
+                    self.diff_mode = match self.diff_mode {
+                        DiffMode::Unified => DiffMode::SideBySide,
+                        DiffMode::SideBySide => DiffMode::Unified,
+                    };
+                    self.side_panel_scroll = 0;
                 }
             }
             Action::Copy | Action::Paste => { /* handled by platform layer */ }
@@ -835,13 +934,31 @@ impl AppCallbacks for TermeshCallbacks {
         if side_rect.width > 0 && side_rect.height > 0 {
             let panel_cols = (side_rect.width as f32 / cell_w).floor() as usize;
             let panel_rows = (side_rect.height as f32 / cell_h).floor() as usize;
-            let panel_grid = ui_grid::render_side_panel(
-                self.focus_layout.side_panel(),
-                &self.diff_lines,
-                panel_rows,
-                panel_cols,
-                self.side_panel_scroll,
-            );
+            let panel_grid = match self.side_panel_view {
+                SidePanelView::FileList => ui_grid::render_file_list(
+                    self.focus_layout.side_panel(),
+                    &self.changed_files,
+                    self.file_list_selected,
+                    panel_rows,
+                    panel_cols,
+                ),
+                SidePanelView::FileDiff => match self.diff_mode {
+                    DiffMode::Unified => ui_grid::render_side_panel(
+                        self.focus_layout.side_panel(),
+                        &self.diff_lines,
+                        panel_rows,
+                        panel_cols,
+                        self.side_panel_scroll,
+                    ),
+                    DiffMode::SideBySide => ui_grid::render_side_by_side(
+                        self.focus_layout.side_panel(),
+                        &self.sbs_lines,
+                        panel_rows,
+                        panel_cols,
+                        self.side_panel_scroll,
+                    ),
+                },
+            };
             grids.push((panel_grid, side_rect.x as f32, side_rect.y as f32));
         }
 

@@ -48,8 +48,7 @@ impl WorkspaceLoader {
         let path = self.config_dir.join(format!("{name}.toml"));
         if !path.exists() {
             return Err(PresetError::Validation(format!(
-                "workspace '{name}' not found at {}",
-                path.display()
+                "workspace '{name}' not found"
             )));
         }
         load_preset(&path)
