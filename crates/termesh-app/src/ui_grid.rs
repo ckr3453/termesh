@@ -3,6 +3,7 @@
 
 use crate::theme::*;
 use termesh_core::types::{AgentState, ViewMode, SPINNER_FRAMES};
+use unicode_width::UnicodeWidthChar;
 use termesh_diff::diff_generator::{DiffLine, DiffTag, SideBySideLine};
 use termesh_diff::history::ChangedFile;
 use termesh_layout::session_list::SessionList;
@@ -19,16 +20,16 @@ enum DisplayRow {
     Entry(usize),
 }
 
-/// Build a display plan that groups entries by git project.
+/// Build a display plan that groups entries by project label.
 ///
 /// Consecutive entries with the same non-empty project get a single header.
 /// Entries with an empty project string appear without a header.
-fn build_display_plan(entry_count: usize, git_projects: &[String]) -> Vec<DisplayRow> {
+fn build_display_plan(entry_count: usize, project_labels: &[String]) -> Vec<DisplayRow> {
     let mut plan = Vec::with_capacity(entry_count * 2);
     let mut prev_project: Option<&str> = None;
 
     for idx in 0..entry_count {
-        let project = git_projects.get(idx).map(|s| s.as_str()).unwrap_or("");
+        let project = project_labels.get(idx).map(|s| s.as_str()).unwrap_or("");
         if !project.is_empty() {
             let need_header = match prev_project {
                 Some(prev) => prev != project,
@@ -70,7 +71,7 @@ fn compute_scroll_offset(
 
 /// Render a session list into a GridSnapshot (minimal design).
 ///
-/// Layout: entries grouped by git project, with optional project headers.
+/// Layout: entries grouped by project label, with optional project headers.
 /// ```text
 /// ─ termesh ─────────────
 ///   ⠋ Backend          claude
@@ -86,14 +87,14 @@ pub fn render_session_list(
     cols: usize,
     spinner_frame: usize,
     agent_kinds: &[String],
-    git_projects: &[String],
+    project_labels: &[String],
 ) -> GridSnapshot {
     let cols = cols.max(1);
     let rows = rows.max(1);
     let mut cells = Vec::with_capacity(rows * cols);
 
     let is_editing = list.is_editing();
-    let display_plan = build_display_plan(list.entries().len(), git_projects);
+    let display_plan = build_display_plan(list.entries().len(), project_labels);
 
     // Compute scroll offset so the selected entry is always visible.
     let scroll_offset = compute_scroll_offset(&display_plan, list.selected_index(), rows);
@@ -101,24 +102,9 @@ pub fn render_session_list(
     for row in 0..rows {
         match display_plan.get(row + scroll_offset) {
             Some(DisplayRow::Header(project)) => {
-                // "  {project}" with remaining space filled by blanks
                 let prefix = format!("  {}", project);
-                let prefix_chars: Vec<char> = prefix.chars().collect();
-                for col_idx in 0..cols {
-                    let c = if col_idx < prefix_chars.len() {
-                        prefix_chars[col_idx]
-                    } else {
-                        ' '
-                    };
-                    cells.push(RenderableCell {
-                        row,
-                        col: col_idx,
-                        c,
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                }
+                let col = push_text_cells(&mut cells, row, 0, cols, &prefix, FG_MUTED, BG_SURFACE);
+                fill_remaining(&mut cells, row, col, cols, FG_MUTED, BG_SURFACE);
             }
             Some(DisplayRow::Entry(idx)) => {
                 let entry = &list.entries()[*idx];
@@ -130,55 +116,56 @@ pub fn render_session_list(
                     if let Some(edit) = list.edit_state() {
                         let buffer = edit.text();
                         let cursor_pos = edit.cursor();
-                        let prefix = "  ";
-                        let prefix_chars: Vec<char> = prefix.chars().collect();
-                        let buf_chars: Vec<char> = buffer.chars().collect();
-
-                        for col_idx in 0..cols {
-                            if col_idx < prefix_chars.len() {
+                        let mut col =
+                            push_text_cells(&mut cells, row, 0, cols, "  ", FG_PRIMARY, bg);
+                        let mut char_idx = 0;
+                        for ch in buffer.chars() {
+                            if col >= cols {
+                                break;
+                            }
+                            let is_cursor = char_idx == cursor_pos;
+                            let w = char_width(ch);
+                            let (cell_fg, cell_bg) = if is_cursor {
+                                (BG_SURFACE, FG_PRIMARY)
+                            } else {
+                                (FG_PRIMARY, bg)
+                            };
+                            cells.push(RenderableCell {
+                                row,
+                                col,
+                                c: ch,
+                                fg: cell_fg,
+                                bg: cell_bg,
+                                wide: w == 2,
+                                ..Default::default()
+                            });
+                            col += 1;
+                            if w == 2 && col < cols {
                                 cells.push(RenderableCell {
                                     row,
-                                    col: col_idx,
-                                    c: prefix_chars[col_idx],
-                                    fg: FG_PRIMARY,
-                                    bg,
+                                    col,
+                                    c: ' ',
+                                    fg: cell_fg,
+                                    bg: cell_bg,
+                                    spacer: true,
                                     ..Default::default()
                                 });
-                            } else {
-                                let buf_idx = col_idx - prefix_chars.len();
-                                let is_cursor = buf_idx == cursor_pos;
-                                if buf_idx < buf_chars.len() {
-                                    cells.push(RenderableCell {
-                                        row,
-                                        col: col_idx,
-                                        c: buf_chars[buf_idx],
-                                        // Cursor: inverted colors
-                                        fg: if is_cursor { BG_SURFACE } else { FG_PRIMARY },
-                                        bg: if is_cursor { FG_PRIMARY } else { bg },
-                                        ..Default::default()
-                                    });
-                                } else if is_cursor {
-                                    // Cursor at end of buffer
-                                    cells.push(RenderableCell {
-                                        row,
-                                        col: col_idx,
-                                        c: ' ',
-                                        fg: BG_SURFACE,
-                                        bg: FG_PRIMARY,
-                                        ..Default::default()
-                                    });
-                                } else {
-                                    cells.push(RenderableCell {
-                                        row,
-                                        col: col_idx,
-                                        c: ' ',
-                                        fg: FG_PRIMARY,
-                                        bg,
-                                        ..Default::default()
-                                    });
-                                }
+                                col += 1;
                             }
+                            char_idx += 1;
                         }
+                        if char_idx == cursor_pos && col < cols {
+                            cells.push(RenderableCell {
+                                row,
+                                col,
+                                c: ' ',
+                                fg: BG_SURFACE,
+                                bg: FG_PRIMARY,
+                                ..Default::default()
+                            });
+                            col += 1;
+                        }
+                        fill_remaining(&mut cells, row, col, cols, FG_PRIMARY, bg);
                     } else {
                         fill_row(&mut cells, row, cols, ' ', FG_PRIMARY, bg);
                     }
@@ -191,84 +178,57 @@ pub fn render_session_list(
                         FG_SECONDARY
                     };
 
-                    // Right-side label: agent kind from dynamic lookup
                     let right_label = agent_kinds.get(*idx).map(|s| s.as_str()).unwrap_or("");
-                    let right_chars: Vec<char> = right_label.chars().collect();
-                    let right_start = if right_chars.is_empty() {
+                    let right_width = display_width(right_label);
+                    let right_start = if right_width == 0 {
                         cols
                     } else {
-                        cols.saturating_sub(right_chars.len() + 1)
+                        cols.saturating_sub(right_width + 1)
                     };
 
-                    // "  {icon} {label}"
-                    let label_chars: Vec<char> = entry.label.chars().collect();
-                    let icon_col = 2;
-                    let label_start = 4; // "  X "
-
-                    for col_idx in 0..cols {
-                        if col_idx < 2 {
-                            // Padding
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: ' ',
-                                fg,
-                                bg,
-                                ..Default::default()
-                            });
-                        } else if col_idx == icon_col {
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: state_icon,
-                                fg: state_fg,
-                                bg,
-                                ..Default::default()
-                            });
-                        } else if col_idx == 3 {
-                            // Space after icon
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: ' ',
-                                fg,
-                                bg,
-                                ..Default::default()
-                            });
-                        } else if col_idx >= label_start
-                            && col_idx - label_start < label_chars.len()
-                            && col_idx < right_start
-                        {
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: label_chars[col_idx - label_start],
-                                fg,
-                                bg,
-                                ..Default::default()
-                            });
-                        } else if col_idx >= right_start
-                            && col_idx - right_start < right_chars.len()
-                        {
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: right_chars[col_idx - right_start],
-                                fg: FG_MUTED,
-                                bg,
-                                ..Default::default()
-                            });
-                        } else {
-                            cells.push(RenderableCell {
-                                row,
-                                col: col_idx,
-                                c: ' ',
-                                fg,
-                                bg,
-                                ..Default::default()
-                            });
-                        }
+                    let mut col = 0;
+                    // "  " padding
+                    while col < 2 && col < cols {
+                        cells.push(RenderableCell {
+                            row,
+                            col,
+                            c: ' ',
+                            fg,
+                            bg,
+                            ..Default::default()
+                        });
+                        col += 1;
                     }
+                    // State icon
+                    if col < cols {
+                        cells.push(RenderableCell {
+                            row,
+                            col,
+                            c: state_icon,
+                            fg: state_fg,
+                            bg,
+                            ..Default::default()
+                        });
+                        col += 1;
+                    }
+                    // Space after icon
+                    if col < cols {
+                        cells.push(RenderableCell {
+                            row,
+                            col,
+                            c: ' ',
+                            fg,
+                            bg,
+                            ..Default::default()
+                        });
+                        col += 1;
+                    }
+                    // Label + gap (up to right_start)
+                    col = push_text_cells(&mut cells, row, col, right_start.min(cols), &entry.label, fg, bg);
+                    fill_remaining(&mut cells, row, col, right_start.min(cols), fg, bg);
+                    // Right label
+                    col = push_text_cells(&mut cells, row, col.max(right_start), cols, right_label, FG_MUTED, bg);
+                    fill_remaining(&mut cells, row, col, cols, fg, bg);
                 }
             }
             None => {
@@ -340,9 +300,9 @@ pub fn render_status_bar(
 
     // Platform-aware modifier prefix
     #[cfg(target_os = "macos")]
-    const P: &str = "⌘";
+    const P: &str = "⌘ + ";
     #[cfg(not(target_os = "macos"))]
-    const P: &str = "Ctrl+";
+    const P: &str = "Ctrl + ";
 
     let hints: Vec<(String, &str)> = match view_mode {
         ViewMode::Focus => vec![
@@ -366,8 +326,8 @@ pub fn render_status_bar(
     };
 
     let right = format!(" {}/{} ", selected_index + 1, session_count);
-    let right_chars: Vec<char> = right.chars().collect();
-    let right_start = cols.saturating_sub(right_chars.len());
+    let right_width = display_width(&right);
+    let right_start = cols.saturating_sub(right_width);
 
     // Build hint string with interleaved colors
     let mut hint_segments: Vec<(String, Rgba)> = Vec::new();
@@ -380,45 +340,29 @@ pub fn render_status_bar(
         hint_segments.push((format!(" {desc}"), FG_SECONDARY));
     }
 
-    // Flatten hint segments into (char, color) pairs
-    let mut hint_chars: Vec<(char, Rgba)> = Vec::new();
+    let mut col = 0;
+    // Hint segments
     for (text, color) in &hint_segments {
-        for c in text.chars() {
-            hint_chars.push((c, *color));
+        col = push_text_cells(&mut cells, 0, col, right_start.min(cols), text, *color, BG_ELEVATED);
+        if col >= right_start {
+            break;
         }
     }
-
-    for col in 0..cols {
-        if col < hint_chars.len() && col < right_start {
-            let (c, fg) = hint_chars[col];
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c,
-                fg,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        } else if col >= right_start && col - right_start < right_chars.len() {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: right_chars[col - right_start],
-                fg: FG_SECONDARY,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        } else {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: ' ',
-                fg: FG_SECONDARY,
-                bg: BG_ELEVATED,
-                ..Default::default()
-            });
-        }
+    // Gap
+    while col < right_start && col < cols {
+        cells.push(RenderableCell {
+            row: 0,
+            col,
+            c: ' ',
+            fg: FG_SECONDARY,
+            bg: BG_ELEVATED,
+            ..Default::default()
+        });
+        col += 1;
     }
+    // Right text
+    col = push_text_cells(&mut cells, 0, col, cols, &right, FG_SECONDARY, BG_ELEVATED);
+    fill_remaining(&mut cells, 0, col, cols, FG_SECONDARY, BG_ELEVATED);
 
     GridSnapshot {
         cells,
@@ -452,60 +396,13 @@ pub fn render_side_panel(
 
     // Row 0: title " Changes"
     let title = " Changes";
-    let title_chars: Vec<char> = title.chars().collect();
-    for col_idx in 0..cols {
-        let c = title_chars.get(col_idx).copied().unwrap_or(' ');
-        let fg = if col_idx < title_chars.len() {
-            FG_SECONDARY
-        } else {
-            FG_MUTED
-        };
-        cells.push(RenderableCell {
-            row: 0,
-            col: col_idx,
-            c,
-            fg,
-            bg: BG_ELEVATED,
-            ..Default::default()
-        });
-    }
+    let col = push_text_cells(&mut cells, 0, 0, cols, title, FG_SECONDARY, BG_ELEVATED);
+    fill_remaining(&mut cells, 0, col, cols, FG_MUTED, BG_ELEVATED);
 
     let content_rows = rows.saturating_sub(1);
 
     if diff_lines.is_empty() {
-        // Empty state: center "No changes" in the content area
-        let msg = "No changes";
-        let msg_chars: Vec<char> = msg.chars().collect();
-        let center_row = content_rows / 2;
-        let center_col = cols.saturating_sub(msg_chars.len()) / 2;
-
-        for content_row in 0..content_rows {
-            let row_idx = content_row + 1;
-            for col_idx in 0..cols {
-                if content_row == center_row
-                    && col_idx >= center_col
-                    && col_idx - center_col < msg_chars.len()
-                {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: msg_chars[col_idx - center_col],
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                } else {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: ' ',
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
+        push_empty_state(&mut cells, content_rows, cols);
     } else {
         // Diff content (scrollable)
         for content_row in 0..content_rows {
@@ -520,19 +417,9 @@ pub fn render_side_panel(
                 };
 
                 let line_text = format!("{prefix}{}", diff_line.content);
-                let line_chars: Vec<char> = line_text.chars().collect();
-
-                for col_idx in 0..cols {
-                    let c = line_chars.get(col_idx).copied().unwrap_or(' ');
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c,
-                        fg,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                }
+                let col =
+                    push_text_cells(&mut cells, row_idx, 0, cols, &line_text, fg, BG_SURFACE);
+                fill_remaining(&mut cells, row_idx, col, cols, fg, BG_SURFACE);
             } else {
                 fill_row(&mut cells, row_idx, cols, ' ', FG_SECONDARY, BG_SURFACE);
             }
@@ -574,23 +461,8 @@ pub fn render_side_by_side(
 
     // Row 0: title
     let title = " Changes (side-by-side)";
-    let title_chars: Vec<char> = title.chars().collect();
-    for col_idx in 0..cols {
-        let c = title_chars.get(col_idx).copied().unwrap_or(' ');
-        let fg = if col_idx < title_chars.len() {
-            FG_SECONDARY
-        } else {
-            FG_MUTED
-        };
-        cells.push(RenderableCell {
-            row: 0,
-            col: col_idx,
-            c,
-            fg,
-            bg: BG_ELEVATED,
-            ..Default::default()
-        });
-    }
+    let col = push_text_cells(&mut cells, 0, 0, cols, title, FG_SECONDARY, BG_ELEVATED);
+    fill_remaining(&mut cells, 0, col, cols, FG_MUTED, BG_ELEVATED);
 
     let content_rows = rows.saturating_sub(1);
     // Split: left half + divider + right half
@@ -598,38 +470,7 @@ pub fn render_side_by_side(
     let div_col = half;
 
     if sbs_lines.is_empty() {
-        let msg = "No changes";
-        let msg_chars: Vec<char> = msg.chars().collect();
-        let center_row = content_rows / 2;
-        let center_col = cols.saturating_sub(msg_chars.len()) / 2;
-
-        for content_row in 0..content_rows {
-            let row_idx = content_row + 1;
-            for col_idx in 0..cols {
-                if content_row == center_row
-                    && col_idx >= center_col
-                    && col_idx - center_col < msg_chars.len()
-                {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: msg_chars[col_idx - center_col],
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                } else {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: ' ',
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
+        push_empty_state(&mut cells, content_rows, cols);
     } else {
         for content_row in 0..content_rows {
             let row_idx = content_row + 1;
@@ -638,8 +479,8 @@ pub fn render_side_by_side(
             if let Some(sbs) = sbs_lines.get(line_idx) {
                 let left_text = sbs.left.as_deref().unwrap_or("");
                 let right_text = sbs.right.as_deref().unwrap_or("");
-                let left_chars: Vec<char> = left_text.trim_end_matches('\n').chars().collect();
-                let right_chars: Vec<char> = right_text.trim_end_matches('\n').chars().collect();
+                let left_trimmed = left_text.trim_end_matches('\n');
+                let right_trimmed = right_text.trim_end_matches('\n');
 
                 let (left_fg, right_fg) = match sbs.tag {
                     DiffTag::Equal => (FG_SECONDARY, FG_SECONDARY),
@@ -647,42 +488,32 @@ pub fn render_side_by_side(
                     DiffTag::Insert => (FG_MUTED, DIFF_ADD),
                 };
 
-                for col_idx in 0..cols {
-                    if col_idx == div_col {
-                        // Divider column
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c: '\u{2502}', // │
-                            fg: FG_MUTED,
-                            bg: BG_SURFACE,
-                            ..Default::default()
-                        });
-                    } else if col_idx < div_col {
-                        // Left half
-                        let c = left_chars.get(col_idx).copied().unwrap_or(' ');
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c,
-                            fg: left_fg,
-                            bg: BG_SURFACE,
-                            ..Default::default()
-                        });
-                    } else {
-                        // Right half
-                        let right_idx = col_idx - div_col - 1;
-                        let c = right_chars.get(right_idx).copied().unwrap_or(' ');
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c,
-                            fg: right_fg,
-                            bg: BG_SURFACE,
-                            ..Default::default()
-                        });
-                    }
+                // Left half
+                let mut col =
+                    push_text_cells(&mut cells, row_idx, 0, div_col, left_trimmed, left_fg, BG_SURFACE);
+                fill_remaining(&mut cells, row_idx, col, div_col, left_fg, BG_SURFACE);
+                // Divider
+                if div_col < cols {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col: div_col,
+                        c: '\u{2502}', // │
+                        fg: FG_MUTED,
+                        bg: BG_SURFACE,
+                        ..Default::default()
+                    });
                 }
+                // Right half
+                col = push_text_cells(
+                    &mut cells,
+                    row_idx,
+                    div_col + 1,
+                    cols,
+                    right_trimmed,
+                    right_fg,
+                    BG_SURFACE,
+                );
+                fill_remaining(&mut cells, row_idx, col, cols, right_fg, BG_SURFACE);
             } else {
                 fill_row(&mut cells, row_idx, cols, ' ', FG_SECONDARY, BG_SURFACE);
             }
@@ -729,59 +560,13 @@ pub fn render_file_list(
     } else {
         format!(" Changes ({} files)", files.len())
     };
-    let title_chars: Vec<char> = title.chars().collect();
-    for col_idx in 0..cols {
-        let c = title_chars.get(col_idx).copied().unwrap_or(' ');
-        let fg = if col_idx < title_chars.len() {
-            FG_SECONDARY
-        } else {
-            FG_MUTED
-        };
-        cells.push(RenderableCell {
-            row: 0,
-            col: col_idx,
-            c,
-            fg,
-            bg: BG_ELEVATED,
-            ..Default::default()
-        });
-    }
+    let col = push_text_cells(&mut cells, 0, 0, cols, &title, FG_SECONDARY, BG_ELEVATED);
+    fill_remaining(&mut cells, 0, col, cols, FG_MUTED, BG_ELEVATED);
 
     let content_rows = rows.saturating_sub(1);
 
     if files.is_empty() {
-        let msg = "No changes";
-        let msg_chars: Vec<char> = msg.chars().collect();
-        let center_row = content_rows / 2;
-        let center_col = cols.saturating_sub(msg_chars.len()) / 2;
-
-        for content_row in 0..content_rows {
-            let row_idx = content_row + 1;
-            for col_idx in 0..cols {
-                if content_row == center_row
-                    && col_idx >= center_col
-                    && col_idx - center_col < msg_chars.len()
-                {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: msg_chars[col_idx - center_col],
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                } else {
-                    cells.push(RenderableCell {
-                        row: row_idx,
-                        col: col_idx,
-                        c: ' ',
-                        fg: FG_MUTED,
-                        bg: BG_SURFACE,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
+        push_empty_state(&mut cells, content_rows, cols);
     } else {
         for content_row in 0..content_rows {
             let row_idx = content_row + 1;
@@ -802,10 +587,9 @@ pub fn render_file_list(
                     _ => FG_SECONDARY,
                 };
 
-                // Right side: colored stats segments
+                // Right side: colored stats segments (all ASCII)
                 let add_str = format!("+{}", file.insertions);
                 let del_str = format!("-{}", file.deletions);
-                // Build (char, color) pairs for right side
                 let mut right_parts: Vec<(char, Rgba)> = Vec::new();
                 for c in add_str.chars() {
                     right_parts.push((c, DIFF_ADD));
@@ -816,51 +600,53 @@ pub fn render_file_list(
                 }
                 let stats_start = cols.saturating_sub(right_parts.len() + 1);
 
-                // Left side: " M filename"
-                let left = format!(" {} {}", file.status, filename);
-                let left_chars: Vec<char> = left.chars().collect();
-
-                for col_idx in 0..cols {
-                    if col_idx == 1 {
-                        // Status character
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c: file.status,
-                            fg: status_fg,
-                            bg,
-                            ..Default::default()
-                        });
-                    } else if col_idx < left_chars.len() && col_idx < stats_start {
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c: left_chars[col_idx],
-                            fg: FG_PRIMARY,
-                            bg,
-                            ..Default::default()
-                        });
-                    } else if col_idx >= stats_start && col_idx - stats_start < right_parts.len() {
-                        let (c, fg) = right_parts[col_idx - stats_start];
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c,
-                            fg,
-                            bg,
-                            ..Default::default()
-                        });
-                    } else {
-                        cells.push(RenderableCell {
-                            row: row_idx,
-                            col: col_idx,
-                            c: ' ',
-                            fg: FG_MUTED,
-                            bg,
-                            ..Default::default()
-                        });
-                    }
+                let mut col = 0;
+                // " " space
+                if col < cols {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col,
+                        c: ' ',
+                        fg: FG_PRIMARY,
+                        bg,
+                        ..Default::default()
+                    });
+                    col += 1;
                 }
+                // Status character
+                if col < cols {
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col,
+                        c: file.status,
+                        fg: status_fg,
+                        bg,
+                        ..Default::default()
+                    });
+                    col += 1;
+                }
+                // " filename"
+                // Filename + gap (up to stats)
+                let name_text = format!(" {}", filename);
+                col = push_text_cells(&mut cells, row_idx, col, stats_start.min(cols), &name_text, FG_PRIMARY, bg);
+                fill_remaining(&mut cells, row_idx, col, stats_start.min(cols), FG_MUTED, bg);
+                // Stats (all single-width ASCII)
+                let mut col = col.max(stats_start);
+                for &(c, fg) in &right_parts {
+                    if col >= cols {
+                        break;
+                    }
+                    cells.push(RenderableCell {
+                        row: row_idx,
+                        col,
+                        c,
+                        fg,
+                        bg,
+                        ..Default::default()
+                    });
+                    col += 1;
+                }
+                fill_remaining(&mut cells, row_idx, col, cols, FG_MUTED, bg);
             } else {
                 fill_row(&mut cells, row_idx, cols, ' ', FG_MUTED, BG_SURFACE);
             }
@@ -882,6 +668,100 @@ pub fn render_file_list(
 
 // ── Shared rendering helpers ──────────────────────────────────────────────
 
+/// Return the display width of a character (CJK/emoji = 2, normal = 1, control = 0 → 1).
+fn char_width(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0).max(1)
+}
+
+/// Return the display width of a string (sum of each character's display width).
+pub(crate) fn display_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+/// Push text as cells starting at `col_start`, handling wide characters.
+/// Returns the next column position after the last cell pushed.
+pub(crate) fn push_text_cells(
+    cells: &mut Vec<RenderableCell>,
+    row: usize,
+    col_start: usize,
+    cols: usize,
+    text: &str,
+    fg: Rgba,
+    bg: Rgba,
+) -> usize {
+    let mut col = col_start;
+    for ch in text.chars() {
+        if col >= cols {
+            break;
+        }
+        let w = char_width(ch);
+        cells.push(RenderableCell {
+            row,
+            col,
+            c: ch,
+            fg,
+            bg,
+            wide: w == 2,
+            ..Default::default()
+        });
+        col += 1;
+        if w == 2 && col < cols {
+            cells.push(RenderableCell {
+                row,
+                col,
+                c: ' ',
+                fg,
+                bg,
+                spacer: true,
+                ..Default::default()
+            });
+            col += 1;
+        }
+    }
+    col
+}
+
+/// Fill columns from `col_start` to `cols` with spaces.
+pub(crate) fn fill_remaining(
+    cells: &mut Vec<RenderableCell>,
+    row: usize,
+    col_start: usize,
+    cols: usize,
+    fg: Rgba,
+    bg: Rgba,
+) {
+    for col in col_start..cols {
+        cells.push(RenderableCell {
+            row,
+            col,
+            c: ' ',
+            fg,
+            bg,
+            ..Default::default()
+        });
+    }
+}
+
+/// Render a centered "No changes" empty state in the content area (rows start at 1).
+fn push_empty_state(cells: &mut Vec<RenderableCell>, content_rows: usize, cols: usize) {
+    let msg = "No changes";
+    let msg_width = display_width(msg);
+    let center_row = content_rows / 2;
+    let center_col = cols.saturating_sub(msg_width) / 2;
+
+    for content_row in 0..content_rows {
+        let row_idx = content_row + 1;
+        if content_row == center_row {
+            fill_remaining(cells, row_idx, 0, center_col.min(cols), FG_MUTED, BG_SURFACE);
+            let col =
+                push_text_cells(cells, row_idx, center_col, cols, msg, FG_MUTED, BG_SURFACE);
+            fill_remaining(cells, row_idx, col, cols, FG_MUTED, BG_SURFACE);
+        } else {
+            fill_row(cells, row_idx, cols, ' ', FG_MUTED, BG_SURFACE);
+        }
+    }
+}
+
 /// Render a centered text row into cells.
 pub(crate) fn push_centered_row(
     cells: &mut Vec<RenderableCell>,
@@ -891,24 +771,11 @@ pub(crate) fn push_centered_row(
     fg: Rgba,
     bg: Rgba,
 ) {
-    let chars: Vec<char> = text.chars().collect();
-    let pad = cols.saturating_sub(chars.len()) / 2;
-    for col in 0..cols {
-        let ch_idx = col.wrapping_sub(pad);
-        let c = if col >= pad && ch_idx < chars.len() {
-            chars[ch_idx]
-        } else {
-            ' '
-        };
-        cells.push(RenderableCell {
-            row,
-            col,
-            c,
-            fg,
-            bg,
-            ..Default::default()
-        });
-    }
+    let text_width = display_width(text);
+    let pad = cols.saturating_sub(text_width) / 2;
+    fill_remaining(cells, row, 0, pad.min(cols), fg, bg);
+    let col = push_text_cells(cells, row, pad, cols, text, fg, bg);
+    fill_remaining(cells, row, col, cols, fg, bg);
 }
 
 /// Fill an entire row with a single character and color.
@@ -952,7 +819,6 @@ pub fn render_pane_header(
 
     // Left side: session number + label + agent kind
     let left = format!(" {} {label} {agent_kind}", session_index + 1);
-    let left_chars: Vec<char> = left.chars().collect();
 
     // Right side: state
     let (icon, state_fg) = state_icon_and_color(state, spinner_frame);
@@ -962,49 +828,30 @@ pub fn render_pane_header(
     } else {
         format!("{icon} {name} ")
     };
-    let right_chars: Vec<char> = right_text.chars().collect();
-    let right_start = cols.saturating_sub(right_chars.len());
+    let right_width = display_width(&right_text);
+    let right_start = cols.saturating_sub(right_width);
+    let left_fg = if is_focused { FG_PRIMARY } else { FG_SECONDARY };
 
-    for col in 0..cols {
-        if col == 0 && is_focused {
-            // Focused pane: accent bar on leftmost column
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: '\u{2502}', // │
-                fg: ACCENT,
-                bg,
-                ..Default::default()
-            });
-        } else if col < left_chars.len() {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: left_chars[col],
-                fg: if is_focused { FG_PRIMARY } else { FG_SECONDARY },
-                bg,
-                ..Default::default()
-            });
-        } else if col >= right_start && col - right_start < right_chars.len() {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: right_chars[col - right_start],
-                fg: state_fg,
-                bg,
-                ..Default::default()
-            });
-        } else {
-            cells.push(RenderableCell {
-                row: 0,
-                col,
-                c: ' ',
-                fg: FG_MUTED,
-                bg,
-                ..Default::default()
-            });
-        }
+    let mut col = 0;
+    // Focused pane: accent bar on leftmost column
+    if is_focused && col < cols {
+        cells.push(RenderableCell {
+            row: 0,
+            col,
+            c: '\u{2502}', // │
+            fg: ACCENT,
+            bg,
+            ..Default::default()
+        });
+        col += 1;
     }
+    // Left text (skip leading space if accent bar was placed)
+    let left_text = if is_focused { &left[1..] } else { &left };
+    col = push_text_cells(&mut cells, 0, col, right_start.min(cols), left_text, left_fg, bg);
+    fill_remaining(&mut cells, 0, col, right_start.min(cols), FG_MUTED, bg);
+    // Right text
+    col = push_text_cells(&mut cells, 0, col.max(right_start), cols, &right_text, state_fg, bg);
+    fill_remaining(&mut cells, 0, col, cols, FG_MUTED, bg);
 
     GridSnapshot {
         cells,
@@ -1032,12 +879,14 @@ mod tests {
             label: "Backend".to_string(),
             is_agent: true,
             state: AgentState::Thinking,
+            project_id: None,
         });
         list.add(SessionEntry {
             id: SessionId(2),
             label: "Shell".to_string(),
             is_agent: false,
             state: AgentState::None,
+            project_id: None,
         });
         list
     }
@@ -1207,12 +1056,14 @@ mod tests {
             label: "Backend".to_string(),
             is_agent: true,
             state: AgentState::Thinking,
+            project_id: None,
         });
         list.add(SessionEntry {
             id: SessionId(2),
             label: "Frontend".to_string(),
             is_agent: true,
             state: AgentState::Idle,
+            project_id: None,
         });
         let kinds = vec!["claude".to_string(), "claude".to_string()];
         let projects = vec!["termesh".to_string(), "my-app".to_string()];
@@ -1287,6 +1138,7 @@ mod tests {
                 label: format!("S{i}"),
                 is_agent: true,
                 state: AgentState::Idle,
+                project_id: None,
             });
         }
         // Select last entry
