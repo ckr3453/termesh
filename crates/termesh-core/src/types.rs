@@ -23,6 +23,38 @@ impl fmt::Display for PaneId {
     }
 }
 
+/// Unique identifier for a project (derived from its canonical path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProjectId(pub u64);
+
+impl ProjectId {
+    /// Create a deterministic project ID from a path.
+    ///
+    /// Uses FNV-1a over the UTF-8 path bytes for a stable, reproducible
+    /// identifier that does not change across Rust versions or process restarts.
+    pub fn from_path(path: &std::path::Path) -> Self {
+        Self(fnv1a_64(path.as_os_str().as_encoded_bytes()))
+    }
+}
+
+/// FNV-1a 64-bit hash — deterministic across Rust versions and platforms.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x00000100000001B3;
+    let mut hash = OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+impl fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "project-{}", self.0)
+    }
+}
+
 /// Current state of an AI agent session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentState {
@@ -142,5 +174,26 @@ mod tests {
     #[test]
     fn test_split_layout_default() {
         assert_eq!(SplitLayout::default(), SplitLayout::Quad);
+    }
+
+    #[test]
+    fn test_project_id_from_path_deterministic() {
+        let path = std::path::Path::new("/Users/test/projects/termesh");
+        let id1 = ProjectId::from_path(path);
+        let id2 = ProjectId::from_path(path);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_project_id_from_path_different() {
+        let id1 = ProjectId::from_path(std::path::Path::new("/Users/test/project-a"));
+        let id2 = ProjectId::from_path(std::path::Path::new("/Users/test/project-b"));
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_project_id_display() {
+        let id = ProjectId(123);
+        assert_eq!(id.to_string(), "project-123");
     }
 }

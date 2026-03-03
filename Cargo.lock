@@ -3348,6 +3348,7 @@ dependencies = [
  "termesh-pty",
  "termesh-terminal",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

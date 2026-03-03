@@ -7,4 +7,5 @@ pub mod error;
 pub mod event;
 pub mod license;
 pub mod platform;
+pub mod project;
 pub mod types;
