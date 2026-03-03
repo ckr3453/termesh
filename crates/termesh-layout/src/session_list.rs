@@ -1,6 +1,6 @@
 //! Session list panel: data model for the left sidebar in Focus mode.
 
-use termesh_core::types::{AgentState, SessionId};
+use termesh_core::types::{AgentState, ProjectId, SessionId};
 
 /// Maximum number of sessions displayed in the list.
 const MAX_SESSIONS: usize = 32;
@@ -90,6 +90,8 @@ pub struct SessionEntry {
     pub is_agent: bool,
     /// Current agent state (or `AgentState::None` for shells).
     pub state: AgentState,
+    /// Associated project (sessions with the same project are grouped together).
+    pub project_id: Option<ProjectId>,
 }
 
 /// Manages the session list panel state.
@@ -114,9 +116,22 @@ impl SessionList {
     }
 
     /// Add a session entry. Returns `false` if the list is full.
+    ///
+    /// If the entry has a `project_id`, it is inserted after the last entry
+    /// with the same project so that sessions are grouped by project.
     pub fn add(&mut self, entry: SessionEntry) -> bool {
         if self.entries.len() >= MAX_SESSIONS {
             return false;
+        }
+        if let Some(pid) = entry.project_id {
+            if let Some(last_idx) = self
+                .entries
+                .iter()
+                .rposition(|e| e.project_id == Some(pid))
+            {
+                self.entries.insert(last_idx + 1, entry);
+                return true;
+            }
         }
         self.entries.push(entry);
         true
@@ -266,6 +281,17 @@ mod tests {
             } else {
                 AgentState::None
             },
+            project_id: None,
+        }
+    }
+
+    fn make_entry_with_project(id: u64, label: &str, project_id: ProjectId) -> SessionEntry {
+        SessionEntry {
+            id: SessionId(id),
+            label: label.to_string(),
+            is_agent: true,
+            state: AgentState::Idle,
+            project_id: Some(project_id),
         }
     }
 
@@ -516,6 +542,37 @@ mod tests {
         }
         list.confirm_editing();
         assert_eq!(list.entries()[0].label, "Keep"); // unchanged
+    }
+
+    // ── Project grouping tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_add_groups_by_project() {
+        let mut list = SessionList::new();
+        let px = ProjectId(100);
+        let py = ProjectId(200);
+
+        list.add(make_entry_with_project(1, "A", px)); // A(X)
+        list.add(make_entry_with_project(2, "B", py)); // B(Y)
+        list.add(make_entry_with_project(3, "C", px)); // C(X) → inserted after A
+
+        assert_eq!(list.entries()[0].id, SessionId(1)); // A
+        assert_eq!(list.entries()[1].id, SessionId(3)); // C (grouped with A)
+        assert_eq!(list.entries()[2].id, SessionId(2)); // B
+    }
+
+    #[test]
+    fn test_add_no_project_appends() {
+        let mut list = SessionList::new();
+        let px = ProjectId(100);
+
+        list.add(make_entry_with_project(1, "A", px));
+        list.add(make_entry(2, "B", false)); // no project → appended
+        list.add(make_entry_with_project(3, "C", px));
+
+        assert_eq!(list.entries()[0].id, SessionId(1)); // A
+        assert_eq!(list.entries()[1].id, SessionId(3)); // C (grouped with A)
+        assert_eq!(list.entries()[2].id, SessionId(2)); // B (no project, at end)
     }
 
     #[test]

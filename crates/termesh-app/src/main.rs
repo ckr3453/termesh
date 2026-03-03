@@ -14,10 +14,11 @@ use cli::{Cli, Command};
 use session_manager::SessionManager;
 use session_picker::{SessionPicker, SessionPickerEntry};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use termesh_agent::preset::WorkspacePreset;
-use termesh_core::types::{AgentState, SessionId, SplitLayout, ViewMode};
+use termesh_core::project::{Project, RecentProjects};
+use termesh_core::types::{AgentState, ProjectId, SessionId, SplitLayout, ViewMode};
 use termesh_diff::diff_generator::{DiffLine, DiffMode, SideBySideLine};
 use termesh_diff::git_changes::GitChangeTracker;
 use termesh_diff::history::ChangedFile;
@@ -79,6 +80,10 @@ struct TermeshCallbacks {
     spinner_frame: usize,
     /// Last time the spinner frame advanced.
     last_spinner_tick: Instant,
+    /// Known projects (keyed by ProjectId).
+    projects: HashMap<ProjectId, Project>,
+    /// Recently opened projects (persisted to disk).
+    recent_projects: RecentProjects,
 }
 
 impl TermeshCallbacks {
@@ -104,6 +109,8 @@ impl TermeshCallbacks {
             session_picker: None,
             spinner_frame: 0,
             last_spinner_tick: Instant::now(),
+            projects: HashMap::new(),
+            recent_projects: RecentProjects::load(),
         }
     }
 
@@ -153,6 +160,7 @@ impl TermeshCallbacks {
             }
         }
 
+        callbacks.recent_projects.save();
         callbacks
     }
 
@@ -172,11 +180,14 @@ impl TermeshCallbacks {
             None => (termesh_core::platform::default_shell(), Vec::new()),
         };
 
+        let cwd: Option<PathBuf> = pane_preset.cwd.as_ref().map(PathBuf::from);
+        let project_id = cwd.as_deref().map(|p| self.ensure_project(p));
+
         let config = SessionConfig {
             name: pane_preset.label.clone(),
             command,
             args,
-            cwd: pane_preset.cwd.as_ref().map(PathBuf::from),
+            cwd,
             agent: "auto".to_string(),
             ..Default::default()
         };
@@ -190,6 +201,7 @@ impl TermeshCallbacks {
                     label: pane_preset.label.clone(),
                     is_agent,
                     state: self.session_mgr.agent_state(session_id),
+                    project_id,
                 });
                 self.init_git_tracker(session_id);
             }
@@ -203,17 +215,33 @@ impl TermeshCallbacks {
     }
 
     /// Create a new agent picker with folder paths pre-populated.
+    ///
+    /// Order: recent projects → current directory → active git roots → "Type a path..."
     fn create_picker(&self) -> AgentPicker {
         let mut folders = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            folders.push(cwd);
+
+        // Recent projects first (only if the directory still exists)
+        for path in self.recent_projects.paths() {
+            if path.is_dir() && !folders.contains(&path) {
+                folders.push(path);
+            }
         }
+
+        // Current working directory
+        if let Ok(cwd) = std::env::current_dir() {
+            if !folders.contains(&cwd) {
+                folders.push(cwd);
+            }
+        }
+
+        // Git roots from active sessions
         for tracker in self.git_trackers.values() {
             let root = tracker.git_root().to_path_buf();
             if !folders.contains(&root) {
                 folders.push(root);
             }
         }
+
         let mut picker = AgentPicker::new();
         picker.set_folders(folders);
         picker
@@ -235,6 +263,7 @@ impl TermeshCallbacks {
         self.picker = None;
         self.picker_fullscreen = false;
         self.spawn_agent(&agent_type, cwd);
+        self.recent_projects.save();
         if self.view_mode == ViewMode::Split {
             self.resize_split_panes();
             self.show_picker_if_needed();
@@ -243,9 +272,22 @@ impl TermeshCallbacks {
         }
     }
 
+    /// Register a project for the given working directory.
+    ///
+    /// Updates the recent projects list and persists it to disk.
+    fn ensure_project(&mut self, cwd: &Path) -> ProjectId {
+        let project = Project::from_path(cwd.to_path_buf());
+        let id = project.id;
+        self.recent_projects.touch(&project);
+        self.projects.entry(id).or_insert(project);
+        id
+    }
+
     /// If `cwd` is `Some`, the session starts in the given directory.
     fn spawn_agent(&mut self, agent_type: &str, cwd: Option<PathBuf>) {
         let (command, args, label, _agent_kind, is_agent) = agent_picker::resolve_agent(agent_type);
+
+        let project_id = cwd.as_deref().map(|p| self.ensure_project(p));
 
         // Determine which pane to bind:
         // - Focus mode: always bind to pane[0] (the single visible pane)
@@ -290,6 +332,7 @@ impl TermeshCallbacks {
                     } else {
                         AgentState::None
                     },
+                    project_id,
                 });
                 self.init_git_tracker(session_id);
             }
@@ -662,6 +705,9 @@ impl AppCallbacks for TermeshCallbacks {
                 match text {
                     b"\x1b" => picker.cancel_custom_input(),
                     b"\x7f" | b"\x08" => picker.handle_backspace(),
+                    b"\t" => picker.handle_tab_complete(),
+                    b"\x1b[A" => picker.completion_select_prev(),
+                    b"\x1b[B" => picker.completion_select_next(),
                     b"\r" => picker_spawn = true,
                     _ => {
                         if let Ok(s) = std::str::from_utf8(text) {
@@ -686,7 +732,16 @@ impl AppCallbacks for TermeshCallbacks {
                     b"\x1b[B" => picker.select_next(),
                     b"\x1b" => picker.go_back(),
                     b"\r" => picker_spawn = true,
-                    _ => {}
+                    b"\x7f" | b"\x08" => picker.filter_pop(),
+                    _ => {
+                        // Printable characters → fuzzy filter
+                        for &b in text.iter() {
+                            let c = b as char;
+                            if c.is_ascii_graphic() || c == ' ' {
+                                picker.filter_push(c);
+                            }
+                        }
+                    }
                 }
                 if picker_spawn {
                     self.finalize_picker_spawn();
@@ -1096,19 +1151,15 @@ impl AppCallbacks for TermeshCallbacks {
                     .iter()
                     .map(|e| self.session_mgr.agent_kind(e.id).to_string())
                     .collect();
-                let git_projects: Vec<String> = self
+                let project_labels: Vec<String> = self
                     .focus_layout
                     .sessions()
                     .entries()
                     .iter()
                     .map(|e| {
-                        self.git_trackers
-                            .get(&e.id)
-                            .and_then(|t| {
-                                t.git_root()
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                            })
+                        e.project_id
+                            .and_then(|pid| self.projects.get(&pid))
+                            .map(|p| p.name.clone())
                             .unwrap_or_default()
                     })
                     .collect();
@@ -1118,7 +1169,7 @@ impl AppCallbacks for TermeshCallbacks {
                     list_cols,
                     self.spinner_frame,
                     &agent_kinds,
-                    &git_projects,
+                    &project_labels,
                 );
                 grids.push((list_grid, list_rect.x as f32, list_rect.y as f32));
             }
@@ -1456,7 +1507,7 @@ fn main() {
     }
 
     // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format_timestamp(None)
         .init();
 
@@ -1541,3 +1592,4 @@ fn main() {
         std::process::exit(1);
     }
 }
+

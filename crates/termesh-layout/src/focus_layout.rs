@@ -405,12 +405,14 @@ mod tests {
             label: "Backend".to_string(),
             is_agent: true,
             state: AgentState::Idle,
+            project_id: None,
         });
         layout.sessions_mut().add(SessionEntry {
             id: SessionId(2),
             label: "Shell".to_string(),
             is_agent: false,
             state: AgentState::None,
+            project_id: None,
         });
 
         assert_eq!(layout.sessions().len(), 2);

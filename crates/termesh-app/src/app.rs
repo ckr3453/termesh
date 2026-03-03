@@ -87,6 +87,7 @@ impl App {
                 } else {
                     AgentState::None
                 },
+                project_id: None,
             });
             next_id += 1;
         }
