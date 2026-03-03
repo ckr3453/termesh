@@ -306,10 +306,7 @@ mod tests {
 
     #[test]
     fn test_build_group_label_different() {
-        assert_eq!(
-            build_group_label("my-fork", "termesh"),
-            "my-fork (termesh)"
-        );
+        assert_eq!(build_group_label("my-fork", "termesh"), "my-fork (termesh)");
     }
 
     #[test]

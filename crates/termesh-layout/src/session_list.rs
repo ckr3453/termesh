@@ -124,11 +124,7 @@ impl SessionList {
             return false;
         }
         if let Some(pid) = entry.project_id {
-            if let Some(last_idx) = self
-                .entries
-                .iter()
-                .rposition(|e| e.project_id == Some(pid))
-            {
+            if let Some(last_idx) = self.entries.iter().rposition(|e| e.project_id == Some(pid)) {
                 self.entries.insert(last_idx + 1, entry);
                 return true;
             }

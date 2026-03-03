@@ -627,14 +627,7 @@ impl AgentPicker {
                 } else {
                     "Select project".to_string()
                 };
-                ui_grid::push_centered_row(
-                    &mut cells,
-                    row,
-                    cols,
-                    &title,
-                    FG_PRIMARY,
-                    BG_SURFACE,
-                );
+                ui_grid::push_centered_row(&mut cells, row, cols, &title, FG_PRIMARY, BG_SURFACE);
             } else if rel == body_start + 1 {
                 ui_grid::push_centered_row(
                     &mut cells,
@@ -749,7 +742,11 @@ impl AgentPicker {
                     let marker = if is_highlighted { "\u{25B8} " } else { "  " };
                     let line = format!("    {marker}{name}/");
                     let fg = if is_highlighted { FG_PRIMARY } else { FG_MUTED };
-                    let bg = if is_highlighted { BG_SELECTED } else { BG_SURFACE };
+                    let bg = if is_highlighted {
+                        BG_SELECTED
+                    } else {
+                        BG_SURFACE
+                    };
                     ui_grid::push_centered_row(&mut cells, row, cols, &line, fg, bg);
                 } else {
                     ui_grid::fill_row(&mut cells, row, cols, ' ', FG_MUTED, BG_SURFACE);
@@ -1079,10 +1076,7 @@ mod tests {
 
     #[test]
     fn test_filter_empty_shows_all() {
-        let picker = picker_at_folder_stage(vec![
-            PathBuf::from("/a"),
-            PathBuf::from("/b"),
-        ]);
+        let picker = picker_at_folder_stage(vec![PathBuf::from("/a"), PathBuf::from("/b")]);
         assert_eq!(picker.filtered_indices.len(), 2);
     }
 
@@ -1109,6 +1103,7 @@ mod tests {
     // --- Tab completion tests ---
 
     #[test]
+    #[cfg(unix)]
     fn test_tab_complete_single_match() {
         let mut picker = AgentPicker::new();
         picker.custom_input = Some("/tm".to_string());
@@ -1163,6 +1158,7 @@ mod tests {
     // --- Ghost text / completion preview tests ---
 
     #[test]
+    #[cfg(unix)]
     fn test_ghost_text_appears_on_input() {
         let mut picker = AgentPicker::new();
         picker.custom_input = Some(String::new());
@@ -1176,6 +1172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_ghost_text_tab_accepts() {
         let mut picker = AgentPicker::new();
         picker.custom_input = Some(String::new());
@@ -1189,6 +1186,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_ghost_clears_on_backspace() {
         let mut picker = AgentPicker::new();
         picker.custom_input = Some(String::new());
@@ -1336,7 +1334,10 @@ mod tests {
         assert_eq!(picker.completion_selected, Some(6));
         assert!(picker.completion_scroll > 0);
         // Selected should be within visible window
-        assert!(picker.completion_selected.unwrap() < picker.completion_scroll + AgentPicker::COMPLETION_VISIBLE_MAX);
+        assert!(
+            picker.completion_selected.unwrap()
+                < picker.completion_scroll + AgentPicker::COMPLETION_VISIBLE_MAX
+        );
         assert!(picker.completion_selected.unwrap() >= picker.completion_scroll);
 
         let _ = fs::remove_dir_all(&base);

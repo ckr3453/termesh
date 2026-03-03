@@ -3,12 +3,12 @@
 
 use crate::theme::*;
 use termesh_core::types::{AgentState, ViewMode, SPINNER_FRAMES};
-use unicode_width::UnicodeWidthChar;
 use termesh_diff::diff_generator::{DiffLine, DiffTag, SideBySideLine};
 use termesh_diff::history::ChangedFile;
 use termesh_layout::session_list::SessionList;
 use termesh_layout::side_panel::SidePanel;
 use termesh_terminal::grid::{CursorState, GridSnapshot, RenderableCell};
+use unicode_width::UnicodeWidthChar;
 
 // ── Session list ───────────────────────────────────────────────────────────
 
@@ -224,10 +224,26 @@ pub fn render_session_list(
                         col += 1;
                     }
                     // Label + gap (up to right_start)
-                    col = push_text_cells(&mut cells, row, col, right_start.min(cols), &entry.label, fg, bg);
+                    col = push_text_cells(
+                        &mut cells,
+                        row,
+                        col,
+                        right_start.min(cols),
+                        &entry.label,
+                        fg,
+                        bg,
+                    );
                     fill_remaining(&mut cells, row, col, right_start.min(cols), fg, bg);
                     // Right label
-                    col = push_text_cells(&mut cells, row, col.max(right_start), cols, right_label, FG_MUTED, bg);
+                    col = push_text_cells(
+                        &mut cells,
+                        row,
+                        col.max(right_start),
+                        cols,
+                        right_label,
+                        FG_MUTED,
+                        bg,
+                    );
                     fill_remaining(&mut cells, row, col, cols, fg, bg);
                 }
             }
@@ -343,7 +359,15 @@ pub fn render_status_bar(
     let mut col = 0;
     // Hint segments
     for (text, color) in &hint_segments {
-        col = push_text_cells(&mut cells, 0, col, right_start.min(cols), text, *color, BG_ELEVATED);
+        col = push_text_cells(
+            &mut cells,
+            0,
+            col,
+            right_start.min(cols),
+            text,
+            *color,
+            BG_ELEVATED,
+        );
         if col >= right_start {
             break;
         }
@@ -417,8 +441,7 @@ pub fn render_side_panel(
                 };
 
                 let line_text = format!("{prefix}{}", diff_line.content);
-                let col =
-                    push_text_cells(&mut cells, row_idx, 0, cols, &line_text, fg, BG_SURFACE);
+                let col = push_text_cells(&mut cells, row_idx, 0, cols, &line_text, fg, BG_SURFACE);
                 fill_remaining(&mut cells, row_idx, col, cols, fg, BG_SURFACE);
             } else {
                 fill_row(&mut cells, row_idx, cols, ' ', FG_SECONDARY, BG_SURFACE);
@@ -489,8 +512,15 @@ pub fn render_side_by_side(
                 };
 
                 // Left half
-                let mut col =
-                    push_text_cells(&mut cells, row_idx, 0, div_col, left_trimmed, left_fg, BG_SURFACE);
+                let mut col = push_text_cells(
+                    &mut cells,
+                    row_idx,
+                    0,
+                    div_col,
+                    left_trimmed,
+                    left_fg,
+                    BG_SURFACE,
+                );
                 fill_remaining(&mut cells, row_idx, col, div_col, left_fg, BG_SURFACE);
                 // Divider
                 if div_col < cols {
@@ -628,8 +658,23 @@ pub fn render_file_list(
                 // " filename"
                 // Filename + gap (up to stats)
                 let name_text = format!(" {}", filename);
-                col = push_text_cells(&mut cells, row_idx, col, stats_start.min(cols), &name_text, FG_PRIMARY, bg);
-                fill_remaining(&mut cells, row_idx, col, stats_start.min(cols), FG_MUTED, bg);
+                col = push_text_cells(
+                    &mut cells,
+                    row_idx,
+                    col,
+                    stats_start.min(cols),
+                    &name_text,
+                    FG_PRIMARY,
+                    bg,
+                );
+                fill_remaining(
+                    &mut cells,
+                    row_idx,
+                    col,
+                    stats_start.min(cols),
+                    FG_MUTED,
+                    bg,
+                );
                 // Stats (all single-width ASCII)
                 let mut col = col.max(stats_start);
                 for &(c, fg) in &right_parts {
@@ -752,9 +797,15 @@ fn push_empty_state(cells: &mut Vec<RenderableCell>, content_rows: usize, cols: 
     for content_row in 0..content_rows {
         let row_idx = content_row + 1;
         if content_row == center_row {
-            fill_remaining(cells, row_idx, 0, center_col.min(cols), FG_MUTED, BG_SURFACE);
-            let col =
-                push_text_cells(cells, row_idx, center_col, cols, msg, FG_MUTED, BG_SURFACE);
+            fill_remaining(
+                cells,
+                row_idx,
+                0,
+                center_col.min(cols),
+                FG_MUTED,
+                BG_SURFACE,
+            );
+            let col = push_text_cells(cells, row_idx, center_col, cols, msg, FG_MUTED, BG_SURFACE);
             fill_remaining(cells, row_idx, col, cols, FG_MUTED, BG_SURFACE);
         } else {
             fill_row(cells, row_idx, cols, ' ', FG_MUTED, BG_SURFACE);
@@ -847,10 +898,26 @@ pub fn render_pane_header(
     }
     // Left text (skip leading space if accent bar was placed)
     let left_text = if is_focused { &left[1..] } else { &left };
-    col = push_text_cells(&mut cells, 0, col, right_start.min(cols), left_text, left_fg, bg);
+    col = push_text_cells(
+        &mut cells,
+        0,
+        col,
+        right_start.min(cols),
+        left_text,
+        left_fg,
+        bg,
+    );
     fill_remaining(&mut cells, 0, col, right_start.min(cols), FG_MUTED, bg);
     // Right text
-    col = push_text_cells(&mut cells, 0, col.max(right_start), cols, &right_text, state_fg, bg);
+    col = push_text_cells(
+        &mut cells,
+        0,
+        col.max(right_start),
+        cols,
+        &right_text,
+        state_fg,
+        bg,
+    );
     fill_remaining(&mut cells, 0, col, cols, FG_MUTED, bg);
 
     GridSnapshot {
