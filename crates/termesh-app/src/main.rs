@@ -1503,6 +1503,9 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Ensure CLI tools are discoverable (macOS .app bundles have minimal PATH)
+    termesh_core::platform::ensure_path();
+
     // Initialize logging — redirect to file to avoid console noise
     let log_target = termesh_core::platform::data_dir()
         .map(|d| d.join("logs"))

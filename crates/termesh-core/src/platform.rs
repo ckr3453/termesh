@@ -111,6 +111,34 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Ensure common tool directories are in PATH.
+///
+/// When launched as a macOS `.app` bundle from Finder, the process inherits
+/// a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). This function appends
+/// well-known directories so that CLI tools like `claude`, `codex`, etc. are
+/// discoverable.
+pub fn ensure_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let home = home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+
+    let extra: Vec<String> = [
+        home.join(".local/bin"),
+        home.join(".cargo/bin"),
+        home.join(".npm/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
+    .into_iter()
+    .map(|p| p.to_string_lossy().into_owned())
+    .filter(|p| !current.split(':').any(|c| c == p))
+    .collect();
+
+    if !extra.is_empty() {
+        let new_path = format!("{}:{}", current, extra.join(":"));
+        std::env::set_var("PATH", new_path);
+    }
+}
+
 /// Check if a command is available in PATH.
 pub fn which(cmd: &str) -> bool {
     let sep = if cfg!(windows) { ';' } else { ':' };
