@@ -116,28 +116,46 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 /// When launched as a macOS `.app` bundle from Finder, the process inherits
 /// a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). This function appends
 /// well-known directories so that CLI tools like `claude`, `codex`, etc. are
-/// discoverable.
+/// discoverable by both termesh and spawned child processes.
+///
+/// # Safety
+/// Must be called once at startup in `main()` before any threads are spawned.
+#[cfg(target_os = "macos")]
 pub fn ensure_path() {
     let current = std::env::var("PATH").unwrap_or_default();
-    let home = home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let home = home_dir();
 
-    let extra: Vec<String> = [
-        home.join(".local/bin"),
-        home.join(".cargo/bin"),
-        home.join(".npm/bin"),
+    let mut candidates = vec![
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
-    ]
-    .into_iter()
-    .map(|p| p.to_string_lossy().into_owned())
-    .filter(|p| !current.split(':').any(|c| c == p))
-    .collect();
+    ];
+    if let Some(ref h) = home {
+        candidates.push(h.join(".local/bin"));
+        candidates.push(h.join(".cargo/bin"));
+        candidates.push(h.join(".npm/bin"));
+    }
+
+    let extra: Vec<String> = candidates
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !current.split(':').any(|c| c == p))
+        .collect();
 
     if !extra.is_empty() {
-        let new_path = format!("{}:{}", current, extra.join(":"));
-        std::env::set_var("PATH", new_path);
+        let new_path = if current.is_empty() {
+            extra.join(":")
+        } else {
+            format!("{}:{}", current, extra.join(":"))
+        };
+        // SAFETY: Called once at startup in main() before any threads are spawned.
+        unsafe { std::env::set_var("PATH", new_path) };
     }
 }
+
+/// No-op on non-macOS platforms.
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_path() {}
 
 /// Check if a command is available in PATH.
 pub fn which(cmd: &str) -> bool {
