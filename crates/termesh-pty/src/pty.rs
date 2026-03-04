@@ -97,6 +97,10 @@ impl Pty {
         // termesh instances (screen-within-screen).
         cmd.env("TERMESH", "1");
 
+        // Ensure TERM is set so child processes enable color output.
+        // macOS .app bundles inherit a minimal environment without TERM.
+        cmd.env("TERM", "xterm-256color");
+
         // Remove environment variables that prevent nested CLI agent sessions.
         // Claude Code sets these to detect nesting; termesh spawns agents as
         // independent PTY sessions, so they must be cleared.
