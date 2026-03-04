@@ -59,6 +59,7 @@ jobs:
           mkdir -p Termesh.app/Contents/Resources
           cp target/${{ matrix.target }}/release/termesh Termesh.app/Contents/MacOS/termesh
           sed "s|VERSION|$VERSION|g" resources/macos/Info.plist > Termesh.app/Contents/Info.plist
+          codesign --force --deep -s - Termesh.app
           tar czf ${{ matrix.artifact }}.tar.gz Termesh.app
 
       - name: Package (Windows)
