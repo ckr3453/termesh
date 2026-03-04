@@ -446,7 +446,6 @@ impl AgentPicker {
         self.folder_selected = 0;
     }
 
-    /// Whether we are in the folder selection stage.
     pub fn is_folder_stage(&self) -> bool {
         self.stage == PickerStage::SelectFolder
     }
