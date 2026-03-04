@@ -31,9 +31,20 @@ Pre-built binaries are available from [GitHub Releases](https://github.com/ckr34
 | Platform | Download |
 |----------|----------|
 | Windows x86_64 | `termesh-windows-x86_64.tar.gz` |
-| macOS Intel | `termesh-macos-x86_64.tar.gz` |
-| macOS Apple Silicon | `termesh-macos-aarch64.tar.gz` |
+| macOS Intel | `termesh-macos-x86_64.tar.gz` (Termesh.app) |
+| macOS Apple Silicon | `termesh-macos-aarch64.tar.gz` (Termesh.app) |
 | Linux x86_64 | `termesh-linux-x86_64.tar.gz` |
+
+### macOS: First launch
+
+macOS blocks unsigned apps by default. After extracting the `.tar.gz`:
+
+```bash
+# Remove quarantine attribute
+xattr -cr Termesh.app
+
+# Or: right-click Termesh.app → Open → "Open" in the dialog
+```
 
 ### Build from source
 
