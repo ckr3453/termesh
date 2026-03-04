@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod agent_picker;
 mod app;
 mod cli;
@@ -731,17 +733,12 @@ impl AppCallbacks for TermeshCallbacks {
                     b"\x1b[A" => picker.select_prev(),
                     b"\x1b[B" => picker.select_next(),
                     b"\x1b" => picker.go_back(),
-                    b"\r" => picker_spawn = true,
-                    b"\x7f" | b"\x08" => picker.filter_pop(),
-                    _ => {
-                        // Printable characters → fuzzy filter
-                        for &b in text.iter() {
-                            let c = b as char;
-                            if c.is_ascii_graphic() || c == ' ' {
-                                picker.filter_push(c);
-                            }
+                    b"\r" => {
+                        if picker.try_confirm().is_some() {
+                            picker_spawn = true;
                         }
                     }
+                    _ => {}
                 }
                 if picker_spawn {
                     self.finalize_picker_spawn();
@@ -1506,10 +1503,25 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .format_timestamp(None)
-        .init();
+    // Initialize logging — redirect to file to avoid console noise
+    let log_target = termesh_core::platform::data_dir()
+        .map(|d| d.join("logs"))
+        .and_then(|log_dir| {
+            std::fs::create_dir_all(&log_dir).ok()?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("termesh.log"))
+                .ok()
+        });
+
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"));
+    builder.format_timestamp(None);
+    if let Some(file) = log_target {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    builder.init();
 
     // Authentication gate
     let license_dir = termesh_core::platform::data_dir()
