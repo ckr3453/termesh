@@ -135,18 +135,21 @@ pub fn ensure_path() {
         candidates.push(h.join(".npm/bin"));
     }
 
+    let current_dirs: std::collections::HashSet<&str> = current.split(':').collect();
+
     let extra: Vec<String> = candidates
         .into_iter()
         .filter(|p| p.is_dir())
         .map(|p| p.to_string_lossy().into_owned())
-        .filter(|p| !current.split(':').any(|c| c == p))
+        .filter(|p| !current_dirs.contains(p.as_str()))
         .collect();
 
     if !extra.is_empty() {
+        let extra_str = extra.join(":");
         let new_path = if current.is_empty() {
-            extra.join(":")
+            extra_str
         } else {
-            format!("{}:{}", current, extra.join(":"))
+            format!("{}:{}", current, extra_str)
         };
         // SAFETY: Called once at startup in main() before any threads are spawned.
         unsafe { std::env::set_var("PATH", new_path) };
