@@ -136,7 +136,7 @@ pub fn render_session_list(
                                 c: ch,
                                 fg: cell_fg,
                                 bg: cell_bg,
-                                wide: w == 2,
+                                width: w as u8,
                                 ..Default::default()
                             });
                             col += 1;
@@ -264,6 +264,7 @@ pub fn render_session_list(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 
@@ -398,6 +399,7 @@ pub fn render_status_bar(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 
@@ -459,6 +461,7 @@ pub fn render_side_panel(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 
@@ -560,6 +563,7 @@ pub fn render_side_by_side(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 
@@ -708,6 +712,7 @@ pub fn render_file_list(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 
@@ -746,7 +751,7 @@ pub(crate) fn push_text_cells(
             c: ch,
             fg,
             bg,
-            wide: w == 2,
+            width: w as u8,
             ..Default::default()
         });
         col += 1;
@@ -863,13 +868,21 @@ pub fn render_pane_header(
     cols: usize,
     spinner_frame: usize,
     session_index: usize,
+    project_name: &str,
 ) -> GridSnapshot {
     let cols = cols.max(1);
     let mut cells = Vec::with_capacity(cols);
     let bg = BG_ELEVATED;
 
-    // Left side: session number + label + agent kind
-    let left = format!(" {} {label} {agent_kind}", session_index + 1);
+    // Left side: session number + label + project + agent kind
+    let left = if project_name.is_empty() {
+        format!(" {} {label} {agent_kind}", session_index + 1)
+    } else {
+        format!(
+            " {} {label} ({project_name}) {agent_kind}",
+            session_index + 1
+        )
+    };
 
     // Right side: state
     let (icon, state_fg) = state_icon_and_color(state, spinner_frame);
@@ -897,7 +910,11 @@ pub fn render_pane_header(
         col += 1;
     }
     // Left text (skip leading space if accent bar was placed)
-    let left_text = if is_focused { &left[1..] } else { &left };
+    let left_text = if is_focused {
+        left.strip_prefix(' ').unwrap_or(&left)
+    } else {
+        &left
+    };
     col = push_text_cells(
         &mut cells,
         0,
@@ -930,6 +947,7 @@ pub fn render_pane_header(
             visible: false,
         },
         selection: None,
+        dirty_rows: None,
     }
 }
 

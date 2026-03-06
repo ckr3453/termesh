@@ -91,6 +91,8 @@ pub struct SessionManager {
     event_tx: mpsc::Sender<SessionEvent>,
     /// Agent adapter registry for detecting agent state from PTY output.
     registry: AdapterRegistry,
+    /// Whether `process_events` received PTY data in the last tick.
+    had_output: bool,
 }
 
 impl SessionManager {
@@ -103,6 +105,7 @@ impl SessionManager {
             event_rx,
             event_tx,
             registry: AdapterRegistry::with_defaults(),
+            had_output: false,
         }
     }
 
@@ -253,8 +256,10 @@ impl SessionManager {
         let mut exited = Vec::new();
         // Collect adapter analysis results: (session_id, adapter_id, data_text)
         let mut analyze_queue: Vec<(SessionId, String, String)> = Vec::new();
+        self.had_output = false;
 
         while let Ok(event) = self.event_rx.try_recv() {
+            self.had_output = true;
             match event.output {
                 SessionOutput::Data(data) => {
                     if let Some(session) = self.sessions.get_mut(&event.session_id) {
@@ -321,7 +326,7 @@ impl SessionManager {
                         }
                     }
                 }
-            } else if let Some(adapter) = self.registry.get(&adapter_id) {
+            } else if let Some(adapter) = self.registry.get_mut(&adapter_id) {
                 if let Some(new_state) = adapter.analyze_output(&text) {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
                         if session.agent_state != new_state {
@@ -332,6 +337,9 @@ impl SessionManager {
                             session.agent_state = new_state;
                         }
                     }
+                    // Notify adapter of the state change so it can make
+                    // context-aware decisions in future analysis.
+                    adapter.update_state(new_state);
                 }
             }
         }
@@ -372,6 +380,11 @@ impl SessionManager {
     /// Whether there are no sessions.
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
+    }
+
+    /// Whether `process_events` received PTY data in the last tick.
+    pub fn had_output(&self) -> bool {
+        self.had_output
     }
 
     /// Get all session IDs.
@@ -523,7 +536,7 @@ mod tests {
         for _ in 0..10 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let _exited = mgr.process_events();
-            let grid = mgr.terminal(id).unwrap().render_grid();
+            let grid = mgr.terminal_mut(id).unwrap().render_grid();
             if grid.cells.iter().any(|c| c.c != ' ' && c.c != '\0') {
                 return; // success
             }

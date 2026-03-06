@@ -94,6 +94,15 @@ pub struct PixelRect {
     pub height: u32,
 }
 
+impl PixelRect {
+    /// Check if a pixel coordinate falls within this rectangle.
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        let x = self.x as f64;
+        let y = self.y as f64;
+        px >= x && px < x + self.width as f64 && py >= y && py < y + self.height as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +143,21 @@ mod tests {
         let (rows, cols) = pane.grid_size(1280, 800, 8.0, 16.0);
         assert_eq!(cols, 160); // 1280 / 8
         assert_eq!(rows, 50); // 800 / 16
+    }
+
+    #[test]
+    fn test_pixel_rect_contains() {
+        let rect = PixelRect {
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 100,
+        };
+        assert!(rect.contains(100.0, 50.0)); // top-left corner
+        assert!(rect.contains(200.0, 100.0)); // middle
+        assert!(!rect.contains(99.0, 50.0)); // just outside left
+        assert!(!rect.contains(300.0, 50.0)); // right edge (exclusive)
+        assert!(!rect.contains(100.0, 150.0)); // bottom edge (exclusive)
     }
 
     #[test]

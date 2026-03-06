@@ -112,12 +112,22 @@ impl Keymap {
         let p = Self::PRIMARY;
         let ps = Self::PRIMARY_SHIFT;
 
-        // Primary+T: split horizontal
-        map.bind(Keybinding::new(p, Key::Char('t')), Action::SplitHorizontal);
+        // Primary+C: copy selection
+        map.bind(Keybinding::new(p, Key::Char('c')), Action::Copy);
+        // Primary+V: paste clipboard
+        map.bind(Keybinding::new(p, Key::Char('v')), Action::Paste);
+        // Primary+A: select all
+        map.bind(Keybinding::new(p, Key::Char('a')), Action::SelectAll);
+        // Primary+T: new tab
+        map.bind(Keybinding::new(p, Key::Char('t')), Action::NewTab);
         // Primary+Shift+T: split vertical
         map.bind(Keybinding::new(ps, Key::Char('t')), Action::SplitVertical);
-        // Primary+W: close pane
-        map.bind(Keybinding::new(p, Key::Char('w')), Action::ClosePane);
+        // Primary+W: close tab
+        map.bind(Keybinding::new(p, Key::Char('w')), Action::CloseTab);
+        // Primary+Q: quit
+        map.bind(Keybinding::new(p, Key::Char('q')), Action::Quit);
+        // Primary+F: find
+        map.bind(Keybinding::new(p, Key::Char('f')), Action::Find);
         // Primary+E: toggle side panel
         map.bind(Keybinding::new(p, Key::Char('e')), Action::ToggleSidePanel);
         // Primary+1/2/3/4: direct pane focus
@@ -160,12 +170,12 @@ impl Keymap {
         map.bind(Keybinding::new(p, Key::Tab), Action::CycleFocusRegion);
         // Primary+S: swap session in focused pane (Split mode)
         map.bind(Keybinding::new(p, Key::Char('s')), Action::SwapSession);
-        // Ctrl+Shift+C: copy selection
+        // Ctrl+Shift+C: copy selection (Linux convention)
         map.bind(
             Keybinding::new(Modifiers::CTRL_SHIFT, Key::Char('c')),
             Action::Copy,
         );
-        // Ctrl+Shift+V: paste clipboard
+        // Ctrl+Shift+V: paste clipboard (Linux convention)
         map.bind(
             Keybinding::new(Modifiers::CTRL_SHIFT, Key::Char('v')),
             Action::Paste,
@@ -251,14 +261,14 @@ mod tests {
     fn test_default_keymap_has_bindings() {
         let keymap = Keymap::default_keymap();
         assert!(!keymap.is_empty());
-        assert!(keymap.len() >= 26);
+        assert!(keymap.len() >= 31);
     }
 
     #[test]
     fn test_lookup_primary_t() {
         let keymap = Keymap::default_keymap();
         let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('t'));
-        assert_eq!(keymap.lookup(&binding), Some(&Action::SplitHorizontal));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::NewTab));
     }
 
     #[test]
@@ -341,5 +351,47 @@ mod tests {
         let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('t'));
         keymap.bind(binding.clone(), Action::ClosePane);
         assert_eq!(keymap.lookup(&binding), Some(&Action::ClosePane));
+    }
+
+    #[test]
+    fn test_lookup_primary_c_copy() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('c'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::Copy));
+    }
+
+    #[test]
+    fn test_lookup_primary_v_paste() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('v'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::Paste));
+    }
+
+    #[test]
+    fn test_lookup_primary_a_select_all() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('a'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::SelectAll));
+    }
+
+    #[test]
+    fn test_lookup_primary_w_close_tab() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('w'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::CloseTab));
+    }
+
+    #[test]
+    fn test_lookup_primary_q_quit() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('q'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::Quit));
+    }
+
+    #[test]
+    fn test_lookup_primary_f_find() {
+        let keymap = Keymap::default_keymap();
+        let binding = Keybinding::new(Keymap::PRIMARY, Key::Char('f'));
+        assert_eq!(keymap.lookup(&binding), Some(&Action::Find));
     }
 }

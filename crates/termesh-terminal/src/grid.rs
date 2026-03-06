@@ -3,6 +3,7 @@
 use crate::color::{resolve_color, Rgba, DEFAULT_BG, DEFAULT_FG};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi::Color as AnsiColor;
+use unicode_width::UnicodeWidthChar;
 
 /// A single renderable cell for the GPU renderer.
 #[derive(Debug, Clone, Copy)]
@@ -27,8 +28,8 @@ pub struct RenderableCell {
     pub strikethrough: bool,
     /// Whether the cell has inverse colors.
     pub inverse: bool,
-    /// Whether this is a wide character.
-    pub wide: bool,
+    /// Display width of this character in terminal columns (1 or 2+).
+    pub width: u8,
     /// Whether this cell is a spacer following a wide character.
     pub spacer: bool,
 }
@@ -46,7 +47,7 @@ impl Default for RenderableCell {
             underline: false,
             strikethrough: false,
             inverse: false,
-            wide: false,
+            width: 1,
             spacer: false,
         }
     }
@@ -61,7 +62,7 @@ pub struct CursorState {
 }
 
 /// A range of selected text (row, col) coordinates.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SelectionRange {
     /// Start row (inclusive).
     pub start_row: usize,
@@ -86,6 +87,8 @@ pub struct GridSnapshot {
     pub cursor: CursorState,
     /// Currently selected range (if any).
     pub selection: Option<SelectionRange>,
+    /// Per-row dirty flags. `None` means all rows are dirty.
+    pub dirty_rows: Option<Vec<bool>>,
 }
 
 impl GridSnapshot {
@@ -135,8 +138,26 @@ pub(crate) fn build_renderable_cell(
         underline: flags.intersects(CellFlags::ALL_UNDERLINES),
         strikethrough: flags.contains(CellFlags::STRIKEOUT),
         inverse,
-        wide: flags.contains(CellFlags::WIDE_CHAR),
+        width: char_display_width(c, flags),
         spacer: false,
+    }
+}
+
+/// Compute the display width of a character in terminal columns.
+///
+/// Uses `unicode-width` for accurate width, with a fallback to
+/// the alacritty `WIDE_CHAR` flag when unicode-width returns `None`.
+fn char_display_width(c: char, flags: CellFlags) -> u8 {
+    match UnicodeWidthChar::width(c) {
+        Some(w) => (w as u8).max(1),
+        // Control chars / unassigned: trust alacritty's flag
+        None => {
+            if flags.contains(CellFlags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            }
+        }
     }
 }
 
@@ -257,9 +278,35 @@ mod tests {
                 visible: true,
             },
             selection: None,
+            dirty_rows: None,
         };
         assert_eq!(snapshot.cell_at(0, 0).unwrap().c, 'A');
         assert_eq!(snapshot.cell_at(1, 1).unwrap().c, 'D');
         assert!(snapshot.cell_at(2, 0).is_none());
+    }
+
+    #[test]
+    fn test_char_display_width_ascii() {
+        assert_eq!(char_display_width('A', CellFlags::empty()), 1);
+        assert_eq!(char_display_width(' ', CellFlags::empty()), 1);
+    }
+
+    #[test]
+    fn test_char_display_width_cjk() {
+        assert_eq!(char_display_width('한', CellFlags::WIDE_CHAR), 2);
+        assert_eq!(char_display_width('漢', CellFlags::WIDE_CHAR), 2);
+    }
+
+    #[test]
+    fn test_char_display_width_emoji() {
+        assert_eq!(char_display_width('👍', CellFlags::WIDE_CHAR), 2);
+        assert_eq!(char_display_width('🎉', CellFlags::WIDE_CHAR), 2);
+    }
+
+    #[test]
+    fn test_char_display_width_fallback_for_control() {
+        // Control characters: unicode-width returns None, fall back to flags
+        assert_eq!(char_display_width('\0', CellFlags::empty()), 1);
+        assert_eq!(char_display_width('\0', CellFlags::WIDE_CHAR), 2);
     }
 }

@@ -94,6 +94,10 @@ pub struct Terminal {
     selection_anchor: Option<(usize, usize)>,
     /// Selection endpoint (current drag position).
     selection_end: Option<(usize, usize)>,
+    /// Per-row content hashes from the previous `render_grid` call.
+    prev_row_hashes: Vec<u64>,
+    /// Cached display_offset from the previous `render_grid` call.
+    prev_display_offset: usize,
 }
 
 impl Terminal {
@@ -122,6 +126,8 @@ impl Terminal {
             cols,
             selection_anchor: None,
             selection_end: None,
+            prev_row_hashes: Vec::new(),
+            prev_display_offset: 0,
         }
     }
 
@@ -133,24 +139,46 @@ impl Terminal {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    /// Returns the current cursor position as (row, col).
+    ///
+    /// Returns `None` if the display is scrolled away from the cursor.
+    pub fn cursor_position(&self) -> Option<(usize, usize)> {
+        let grid = self.term.grid();
+        if grid.display_offset() != 0 {
+            return None;
+        }
+        let point = grid.cursor.point;
+        if point.line.0 < 0 {
+            return None;
+        }
+        Some((point.line.0 as usize, point.column.0))
+    }
+
     /// Take a snapshot of the current grid for rendering.
     ///
     /// Returns a `GridSnapshot` with all renderable cells and cursor state.
-    /// When the viewport is scrolled (display_offset > 0), cells are read
-    /// from the scrollback history region using negative line indices.
-    pub fn render_grid(&self) -> GridSnapshot {
+    /// Tracks per-row content hashes to determine which rows changed since
+    /// the last call, enabling the renderer to skip unchanged rows.
+    pub fn render_grid(&mut self) -> GridSnapshot {
+        use std::hash::{Hash, Hasher};
+
         let grid = self.term.grid();
         let cols = grid.columns();
         let rows = grid.screen_lines();
         let display_offset = grid.display_offset();
 
+        // If display_offset or dimensions changed, all rows are dirty.
+        let offset_changed = display_offset != self.prev_display_offset;
+        let dims_changed = self.prev_row_hashes.len() != rows;
+
         let mut cells = Vec::with_capacity(rows * cols);
+        let mut row_hashes = Vec::with_capacity(rows);
+        let mut dirty_rows = Vec::with_capacity(rows);
 
         for row_idx in 0..rows {
-            // Apply display_offset: shift line index into scrollback history.
-            // display_offset=0 → Line(0..rows) (current screen)
-            // display_offset=N → Line(-N .. rows-N) (scrolled up N lines)
             let line = Line(row_idx as i32 - display_offset as i32);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
             for col_idx in 0..cols {
                 let point = Point::new(line, Column(col_idx));
                 let cell = &grid[point];
@@ -159,12 +187,30 @@ impl Terminal {
                 let mut renderable =
                     build_renderable_cell(row_idx, col_idx, cell.c, &cell.fg, &cell.bg, cell.flags);
                 renderable.spacer = is_spacer;
+
+                // Hash visual content for dirty detection
+                cell.c.hash(&mut hasher);
+                (renderable.fg.r, renderable.fg.g, renderable.fg.b, renderable.fg.a)
+                    .hash(&mut hasher);
+                (renderable.bg.r, renderable.bg.g, renderable.bg.b, renderable.bg.a)
+                    .hash(&mut hasher);
+                cell.flags.bits().hash(&mut hasher);
+
                 cells.push(renderable);
             }
+
+            let hash = hasher.finish();
+            let is_dirty = offset_changed
+                || dims_changed
+                || self.prev_row_hashes.get(row_idx) != Some(&hash);
+            dirty_rows.push(is_dirty);
+            row_hashes.push(hash);
         }
 
+        self.prev_row_hashes = row_hashes;
+        self.prev_display_offset = display_offset;
+
         let cursor_point = self.term.grid().cursor.point;
-        // Adjust cursor position for display offset. Hide cursor when scrolled.
         let cursor = if display_offset == 0 {
             CursorState {
                 row: cursor_point.line.0 as usize,
@@ -187,6 +233,7 @@ impl Terminal {
             cols,
             cursor,
             selection,
+            dirty_rows: Some(dirty_rows),
         }
     }
 
@@ -458,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_grid_snapshot_full_size() {
-        let term = Terminal::new(24, 80, 10000);
+        let mut term = Terminal::new(24, 80, 10000);
         let grid = term.render_grid();
         assert_eq!(grid.cells.len(), 24 * 80);
     }
@@ -586,5 +633,68 @@ mod tests {
 
         term.scroll_to_bottom();
         assert!(term.render_grid().cursor.visible);
+    }
+
+    #[test]
+    fn test_cursor_position_after_write() {
+        let term = Terminal::new(24, 80, 100);
+        let pos = term.cursor_position();
+        assert_eq!(pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn test_cursor_position_none_when_scrolled() {
+        let mut term = Terminal::new(4, 20, 100);
+        for i in 0..10 {
+            term.feed_bytes(format!("line-{i}\r\n").as_bytes());
+        }
+        term.scroll_up(3);
+        assert_eq!(term.cursor_position(), None);
+    }
+
+    #[test]
+    fn test_dirty_rows_first_call_all_dirty() {
+        let mut term = Terminal::new(4, 10, 100);
+        let grid = term.render_grid();
+        let dirty = grid.dirty_rows.unwrap();
+        assert!(dirty.iter().all(|&d| d), "first render should mark all rows dirty");
+    }
+
+    #[test]
+    fn test_dirty_rows_no_change_all_clean() {
+        let mut term = Terminal::new(4, 10, 100);
+        term.feed_bytes(b"Hello");
+        let _ = term.render_grid(); // first call: all dirty
+        let grid = term.render_grid(); // second call: no changes
+        let dirty = grid.dirty_rows.unwrap();
+        assert!(dirty.iter().all(|&d| !d), "unchanged grid should have no dirty rows");
+    }
+
+    #[test]
+    fn test_dirty_rows_partial_change() {
+        let mut term = Terminal::new(4, 10, 100);
+        let _ = term.render_grid(); // baseline
+
+        // Write to row 0 only
+        term.feed_bytes(b"ABC");
+        let grid = term.render_grid();
+        let dirty = grid.dirty_rows.unwrap();
+        assert!(dirty[0], "row 0 should be dirty after writing");
+        assert!(!dirty[1], "row 1 should be clean");
+        assert!(!dirty[2], "row 2 should be clean");
+    }
+
+    #[test]
+    fn test_dirty_rows_scroll_all_dirty() {
+        let mut term = Terminal::new(4, 10, 100);
+        for i in 0..10 {
+            term.feed_bytes(format!("line-{i}\r\n").as_bytes());
+        }
+        let _ = term.render_grid(); // baseline
+
+        term.scroll_up(2);
+        let grid = term.render_grid();
+        let dirty = grid.dirty_rows.unwrap();
+        assert!(dirty.iter().all(|&d| d), "scrolling should mark all rows dirty");
     }
 }

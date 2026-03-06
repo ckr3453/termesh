@@ -1,9 +1,9 @@
 //! Claude Code adapter: infers agent state from Claude Code terminal output.
 //!
-//! NOTE: This adapter is stateless (per-line analysis). False positives are
-//! possible when agent-spawned command output contains matching substrings.
-//! Phase 2 will introduce a stateful adapter that tracks the current state
-//! to suppress false transitions during command execution.
+//! This adapter is **stateful** — it tracks the current agent state to suppress
+//! false transitions. For example, when the agent is running a command, `error:`
+//! lines in command output are ignored (they are the command's output, not the
+//! agent's state).
 
 use crate::adapter::AgentAdapter;
 use regex::Regex;
@@ -59,6 +59,8 @@ impl StatePatterns {
 /// Adapter for Claude Code AI agent.
 pub struct ClaudeCodeAdapter {
     patterns: StatePatterns,
+    /// Current tracked state for suppressing false transitions.
+    current_state: AgentState,
 }
 
 impl ClaudeCodeAdapter {
@@ -66,7 +68,62 @@ impl ClaudeCodeAdapter {
     pub fn new() -> Self {
         Self {
             patterns: StatePatterns::compile(),
+            current_state: AgentState::Idle,
         }
+    }
+
+    /// Analyze a line with state context.
+    ///
+    /// When the agent is in `RunningCommand` or `WritingCode` state,
+    /// error/success patterns from command output are suppressed —
+    /// only idle prompt or new agent-level transitions are accepted.
+    fn analyze_line_stateful(&self, line: &str) -> Option<AgentState> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Idle prompt always transitions back to Idle regardless of state.
+        if self.patterns.idle_prompt.is_match(trimmed) {
+            return Some(AgentState::Idle);
+        }
+
+        // Thinking pattern always takes effect (agent started processing).
+        if self.patterns.thinking.is_match(trimmed) {
+            return Some(AgentState::Thinking);
+        }
+
+        // WaitingForInput always takes effect (permission prompt).
+        if self.patterns.waiting_for_input.is_match(trimmed) {
+            return Some(AgentState::WaitingForInput);
+        }
+
+        // When in RunningCommand or WritingCode, suppress error/success
+        // patterns because they come from the command's output, not the
+        // agent itself. Only agent-level patterns (thinking, idle, waiting)
+        // can transition out.
+        let in_command_output = matches!(
+            self.current_state,
+            AgentState::RunningCommand | AgentState::WritingCode
+        );
+
+        if !in_command_output {
+            if self.patterns.error.is_match(trimmed) {
+                return Some(AgentState::Error);
+            }
+            if self.patterns.success.is_match(trimmed) {
+                return Some(AgentState::Success);
+            }
+        }
+
+        if self.patterns.running_command.is_match(trimmed) {
+            return Some(AgentState::RunningCommand);
+        }
+        if self.patterns.writing_code.is_match(trimmed) {
+            return Some(AgentState::WritingCode);
+        }
+
+        None
     }
 }
 
@@ -86,35 +143,74 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn analyze_line(&self, line: &str) -> Option<AgentState> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
+        // Stateless fallback (used by default analyze_output trait impl).
+        // The stateful path is used via analyze_output_stateful.
+        self.analyze_line_stateful(line)
+    }
 
-        // Order matters: more specific patterns first.
-        // Error/success are terminal states and should take priority.
-        if self.patterns.error.is_match(trimmed) {
-            return Some(AgentState::Error);
+    fn analyze_output(&self, output: &str) -> Option<AgentState> {
+        // Use stateful analysis: each line is evaluated in context
+        // of the current state (set by the previous line in this chunk).
+        let mut last_state = None;
+        let mut effective_state = self.current_state;
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Idle prompt always accepted.
+            if self.patterns.idle_prompt.is_match(trimmed) {
+                last_state = Some(AgentState::Idle);
+                effective_state = AgentState::Idle;
+                continue;
+            }
+
+            if self.patterns.thinking.is_match(trimmed) {
+                last_state = Some(AgentState::Thinking);
+                effective_state = AgentState::Thinking;
+                continue;
+            }
+
+            if self.patterns.waiting_for_input.is_match(trimmed) {
+                last_state = Some(AgentState::WaitingForInput);
+                effective_state = AgentState::WaitingForInput;
+                continue;
+            }
+
+            let in_command_output = matches!(
+                effective_state,
+                AgentState::RunningCommand | AgentState::WritingCode
+            );
+
+            if !in_command_output {
+                if self.patterns.error.is_match(trimmed) {
+                    last_state = Some(AgentState::Error);
+                    effective_state = AgentState::Error;
+                    continue;
+                }
+                if self.patterns.success.is_match(trimmed) {
+                    last_state = Some(AgentState::Success);
+                    effective_state = AgentState::Success;
+                    continue;
+                }
+            }
+
+            if self.patterns.running_command.is_match(trimmed) {
+                last_state = Some(AgentState::RunningCommand);
+                effective_state = AgentState::RunningCommand;
+                continue;
+            }
+            if self.patterns.writing_code.is_match(trimmed) {
+                last_state = Some(AgentState::WritingCode);
+                effective_state = AgentState::WritingCode;
+            }
         }
-        if self.patterns.success.is_match(trimmed) {
-            return Some(AgentState::Success);
-        }
-        if self.patterns.waiting_for_input.is_match(trimmed) {
-            return Some(AgentState::WaitingForInput);
-        }
-        if self.patterns.running_command.is_match(trimmed) {
-            return Some(AgentState::RunningCommand);
-        }
-        if self.patterns.writing_code.is_match(trimmed) {
-            return Some(AgentState::WritingCode);
-        }
-        if self.patterns.thinking.is_match(trimmed) {
-            return Some(AgentState::Thinking);
-        }
-        if self.patterns.idle_prompt.is_match(trimmed) {
-            return Some(AgentState::Idle);
-        }
-        None
+        last_state
+    }
+
+    fn update_state(&mut self, state: AgentState) {
+        self.current_state = state;
     }
 
     fn is_agent_command(&self, command: &str) -> bool {
@@ -307,6 +403,83 @@ mod tests {
         let a = adapter();
         let output = "✶ Working…\nWriting to src/lib.rs\n✓ Done";
         let state = a.analyze_output(output);
-        assert_eq!(state, Some(AgentState::Success));
+        // ✓ appears while in WritingCode state → suppressed
+        // Last effective state is WritingCode
+        assert_eq!(state, Some(AgentState::WritingCode));
+    }
+
+    // ── Stateful analysis tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_stateful_suppress_error_during_running_command() {
+        let mut a = adapter();
+        // Agent starts running a command
+        a.update_state(AgentState::RunningCommand);
+
+        // Command output contains "error:" — should be suppressed
+        let state = a.analyze_output("error: unused variable `x`");
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn test_stateful_suppress_success_during_running_command() {
+        let mut a = adapter();
+        a.update_state(AgentState::RunningCommand);
+
+        // Command output contains "✓" — should be suppressed
+        let state = a.analyze_output("✓ test passed");
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn test_stateful_idle_prompt_exits_running_command() {
+        let mut a = adapter();
+        a.update_state(AgentState::RunningCommand);
+
+        // Idle prompt should always transition
+        let state = a.analyze_output("❯");
+        assert_eq!(state, Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn test_stateful_thinking_exits_running_command() {
+        let mut a = adapter();
+        a.update_state(AgentState::RunningCommand);
+
+        // Agent starts thinking again — always accepted
+        let state = a.analyze_output("✶ Working…");
+        assert_eq!(state, Some(AgentState::Thinking));
+    }
+
+    #[test]
+    fn test_stateful_error_shown_when_not_in_command() {
+        let mut a = adapter();
+        a.update_state(AgentState::Thinking);
+
+        // Error not inside command output → shown
+        let state = a.analyze_output("Error: compilation failed");
+        assert_eq!(state, Some(AgentState::Error));
+    }
+
+    #[test]
+    fn test_stateful_multi_line_command_with_errors() {
+        let a = adapter();
+        // Agent runs command, command outputs errors, then agent goes back to thinking
+        let output = "Running: cargo test\n\
+                       error: unused variable\n\
+                       Error: test failed\n\
+                       ✶ Working…";
+        let state = a.analyze_output(output);
+        // Running → (error suppressed) → (error suppressed) → Thinking
+        assert_eq!(state, Some(AgentState::Thinking));
+    }
+
+    #[test]
+    fn test_stateful_writing_suppresses_success() {
+        let a = adapter();
+        let output = "Writing to src/lib.rs\n✓ Wrote 42 lines";
+        let state = a.analyze_output(output);
+        // WritingCode → (✓ suppressed during WritingCode)
+        assert_eq!(state, Some(AgentState::WritingCode));
     }
 }
