@@ -216,7 +216,7 @@ impl ApplicationHandler for App {
         let has_pending = self
             .callbacks
             .as_ref()
-            .map_or(false, |cb| cb.has_pending_output());
+            .is_some_and(|cb| cb.has_pending_output());
 
         if self.dirty || has_pending {
             self.request_redraw();
