@@ -7,12 +7,8 @@ license.workspace = true
 [dependencies]
 termesh-core = { path = "../termesh-core" }
 termesh-terminal = { path = "../termesh-terminal" }
-wgpu = "27"
-fontdue = "0.9"
+wgpu = "28"
+glyphon = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
-fdsm = "0.8"
-fdsm-ttf-parser = "0.2"
-image = { version = "0.25", default-features = false }
-nalgebra = "0.34"
-ttf-parser = "0.25"
 log = "0.4"
+unicode-width = "0.2"

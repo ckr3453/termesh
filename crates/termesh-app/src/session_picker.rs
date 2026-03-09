@@ -148,6 +148,7 @@ impl SessionPicker {
                 visible: false,
             },
             selection: None,
+            dirty_rows: None,
         }
     }
 }

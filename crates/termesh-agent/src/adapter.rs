@@ -42,6 +42,13 @@ pub trait AgentAdapter: Send + Sync {
         last_state
     }
 
+    /// Update the adapter's internal state tracking.
+    ///
+    /// Called by the session manager after each successful state transition
+    /// so the adapter can make context-aware decisions in future analysis.
+    /// Default implementation is a no-op (stateless adapters).
+    fn update_state(&mut self, _state: AgentState) {}
+
     /// Check if a given command is likely an agent invocation.
     ///
     /// Used to auto-detect when a user starts an agent in a pane.

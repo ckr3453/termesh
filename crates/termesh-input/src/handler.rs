@@ -171,6 +171,11 @@ fn parse_action(s: &str) -> Option<Action> {
         "sidepanelback" => Some(Action::SidePanelBack),
         "togglediffmode" => Some(Action::ToggleDiffMode),
         "swapsession" => Some(Action::SwapSession),
+        "selectall" => Some(Action::SelectAll),
+        "newtab" => Some(Action::NewTab),
+        "closetab" => Some(Action::CloseTab),
+        "quit" => Some(Action::Quit),
+        "find" => Some(Action::Find),
         _ => None,
     }
 }
@@ -189,14 +194,14 @@ mod tests {
     fn test_handle_key_primary_t() {
         let handler = InputHandler::new();
         let action = handler.handle_key(Keymap::PRIMARY, Key::Char('t'));
-        assert_eq!(action, Some(Action::SplitHorizontal));
+        assert_eq!(action, Some(Action::NewTab));
     }
 
     #[test]
     fn test_handle_key_primary_w() {
         let handler = InputHandler::new();
         let action = handler.handle_key(Keymap::PRIMARY, Key::Char('w'));
-        assert_eq!(action, Some(Action::ClosePane));
+        assert_eq!(action, Some(Action::CloseTab));
     }
 
     #[test]
@@ -258,7 +263,7 @@ action = "ClosePane"
 
         // Default binding should still work
         let action = handler.handle_key(Keymap::PRIMARY, Key::Char('t'));
-        assert_eq!(action, Some(Action::SplitHorizontal));
+        assert_eq!(action, Some(Action::NewTab));
     }
 
     #[test]
@@ -337,6 +342,11 @@ action = "ClosePane"
         assert_eq!(parse_action("SidePanelBack"), Some(Action::SidePanelBack));
         assert_eq!(parse_action("ToggleDiffMode"), Some(Action::ToggleDiffMode));
         assert_eq!(parse_action("SwapSession"), Some(Action::SwapSession));
+        assert_eq!(parse_action("SelectAll"), Some(Action::SelectAll));
+        assert_eq!(parse_action("NewTab"), Some(Action::NewTab));
+        assert_eq!(parse_action("CloseTab"), Some(Action::CloseTab));
+        assert_eq!(parse_action("Quit"), Some(Action::Quit));
+        assert_eq!(parse_action("Find"), Some(Action::Find));
         assert_eq!(parse_action("Unknown"), None);
     }
 

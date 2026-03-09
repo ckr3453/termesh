@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 termesh-core = { path = "../termesh-core" }
 alacritty_terminal = "0.25"
+unicode-width = "0.2"

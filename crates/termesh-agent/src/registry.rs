@@ -43,6 +43,11 @@ impl AdapterRegistry {
         self.adapters.get(id).map(|a| a.as_ref())
     }
 
+    /// Look up an adapter mutably (for stateful adapters that track state).
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut Box<dyn AgentAdapter>> {
+        self.adapters.get_mut(id)
+    }
+
     /// List all registered adapter identifiers.
     pub fn list_ids(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = self.adapters.keys().map(|s| s.as_str()).collect();

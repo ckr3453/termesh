@@ -1,30 +1,23 @@
 //! Main GPU renderer for the terminal grid.
 
 use crate::font::{load_builtin_font, FontMetrics, LoadedFont};
-use crate::glyph_cache::GlyphCache;
+use glyphon::cosmic_text::{Attrs, Family, Shaping};
+use glyphon::{
+    Buffer as GlyphonBuffer, Cache as GlyphonCache, Color as GlyphonColor,
+    Metrics as GlyphonMetrics, Resolution, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
 use termesh_terminal::grid::GridSnapshot;
+use unicode_width::UnicodeWidthStr;
 use wgpu::util::DeviceExt;
 
-/// Per-instance data sent to the GPU for each cell.
+/// Per-instance data sent to the GPU for each background/cursor/divider quad.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CellInstance {
     cell_pos: [f32; 2],
     cell_size: [f32; 2],
-    fg_color: [f32; 4],
     bg_color: [f32; 4],
-    uv_offset: [f32; 2],
-    uv_size: [f32; 2],
-    glyph_offset: [f32; 2],
-    glyph_size: [f32; 2],
-    /// 0.0 = bg-only, 1.0 = bitmap glyph, 2.0 = MSDF glyph.
-    glyph_mode: f32,
-    /// MSDF screen pixel range for edge sharpness. 0.0 for bitmap.
-    msdf_px_range: f32,
 }
-
-/// MSDF range in distance-field pixels (must match font.rs MSDF_RANGE).
-const MSDF_RANGE: f32 = 4.0;
 
 /// Uniform buffer data.
 #[repr(C)]
@@ -33,6 +26,9 @@ struct Uniforms {
     projection: [[f32; 4]; 4],
 }
 
+/// Initial GPU buffer capacity in number of cell instances (80x24 grid).
+const INITIAL_BUFFER_CAPACITY: usize = 1920;
+
 /// GPU terminal renderer.
 pub struct Renderer {
     device: wgpu::Device,
@@ -40,29 +36,59 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     bg_pipeline: wgpu::RenderPipeline,
-    glyph_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    atlas_texture: wgpu::Texture,
-    atlas_bind_group: wgpu::BindGroup,
     font: LoadedFont,
-    glyph_cache: GlyphCache,
     width: u32,
     height: u32,
     /// Frame counter for cursor blink (toggles every ~30 frames at 60fps = 0.5s).
     frame_count: u32,
     /// Reusable per-frame buffers to avoid allocation every frame.
     bg_buf: Vec<CellInstance>,
-    glyph_buf: Vec<CellInstance>,
     cursor_buf: Vec<CellInstance>,
+    /// Pre-allocated GPU vertex buffer for background instances.
+    bg_gpu_buffer: wgpu::Buffer,
+    bg_gpu_capacity: usize,
+    /// Pre-allocated GPU vertex buffer for cursor instances.
+    cursor_gpu_buffer: wgpu::Buffer,
+    cursor_gpu_capacity: usize,
+    /// glyphon text rendering.
+    /// Kept alive for TextAtlas and Viewport bind group ownership.
+    _glyphon_cache: GlyphonCache,
+    text_atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    viewport: Viewport,
+    /// Reusable row buffers for glyphon text layout.
+    row_buffers: Vec<GlyphonBuffer>,
+    /// Reusable per-frame span storage to avoid allocation.
+    span_buf: Vec<(String, GlyphonColor)>,
+    /// Per-row metadata for TextArea construction.
+    row_metas: Vec<RowMeta>,
+    /// Previous total row count for detecting layout changes.
+    prev_total_rows: usize,
+    /// Previous selection range for detecting selection changes.
+    prev_selection: Option<termesh_terminal::grid::SelectionRange>,
+}
+
+/// Metadata for positioning a row's TextArea.
+struct RowMeta {
+    x_offset: f32,
+    y_offset: f32,
+    grid_cols: usize,
+}
+
+/// IME preedit overlay information for rendering.
+pub struct PreeditOverlay {
+    /// The preedit text to display.
+    pub text: String,
+    /// Pixel X position (left edge).
+    pub x: f32,
+    /// Pixel Y position (top edge).
+    pub y: f32,
 }
 
 impl Renderer {
     /// Create a new renderer for the given window surface.
-    ///
-    /// Automatically selects the best available GPU backend (Metal on macOS,
-    /// DX12/Vulkan on Windows, Vulkan on Linux). Falls back to a software
-    /// renderer when no hardware GPU is available.
     pub async fn new(
         window: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
@@ -80,7 +106,6 @@ impl Renderer {
             }
         })?;
 
-        // Try hardware adapter first, then fall back to software renderer
         let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -118,8 +143,6 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("termesh"),
                 required_features: wgpu::Features::empty(),
-                // Use downlevel defaults for broader compatibility across
-                // different GPU backends (integrated GPUs, older hardware).
                 required_limits: wgpu::Limits::downlevel_webgl2_defaults()
                     .using_resolution(adapter.limits()),
                 ..Default::default()
@@ -130,9 +153,6 @@ impl Renderer {
             })?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Prefer non-sRGB format to avoid double gamma correction.
-        // Terminal colors are already in sRGB space (ANSI u8 values),
-        // so we pass them directly without linear conversion.
         let surface_format = surface_caps
             .formats
             .iter()
@@ -145,7 +165,7 @@ impl Renderer {
             format: surface_format,
             width,
             height,
-            present_mode: wgpu::PresentMode::Fifo, // VSync = 60fps
+            present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -158,23 +178,6 @@ impl Renderer {
                 path: "<builtin>".into(),
             }
         })?;
-
-        // Create glyph cache + atlas texture
-        let glyph_cache = GlyphCache::new();
-        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph_atlas"),
-            size: wgpu::Extent3d {
-                width: glyph_cache.atlas_width,
-                height: glyph_cache.atlas_height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
 
         // Shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -216,55 +219,7 @@ impl Renderer {
             }],
         });
 
-        // Atlas texture bind group
-        let atlas_view = atlas_texture.create_view(&Default::default());
-        // Linear filtering: required for MSDF distance interpolation.
-        // Bitmap glyphs still work because the shader reads alpha directly.
-        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let atlas_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("atlas_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas_bind_group"),
-            layout: &atlas_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-            ],
-        });
-
-        // Instance vertex layout
+        // Instance vertex layout (simplified: pos + size + bg_color)
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<CellInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -284,51 +239,16 @@ impl Renderer {
                     offset: 16,
                     shader_location: 2,
                 },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 32,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 48,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 56,
-                    shader_location: 5,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 64,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 72,
-                    shader_location: 7,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 80,
-                    shader_location: 8,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 84,
-                    shader_location: 9,
-                },
             ],
         };
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline_layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout, &atlas_bind_group_layout],
-            push_constant_ranges: &[],
+            label: Some("bg_pipeline_layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout],
+            immediate_size: 0,
         });
 
-        // Background pipeline (opaque)
+        // Background pipeline (opaque, used for bg/cursor/dividers)
         let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("bg_pipeline"),
             layout: Some(&pipeline_layout),
@@ -355,40 +275,25 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
-        // Glyph pipeline (alpha blended)
-        let glyph_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glyph_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_glyph"),
-                buffers: &[instance_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_glyph"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
+        let instance_size = std::mem::size_of::<CellInstance>();
+        let bg_gpu_buffer = create_vertex_buffer(
+            &device,
+            "bg_instances",
+            INITIAL_BUFFER_CAPACITY * instance_size,
+        );
+        let cursor_gpu_buffer =
+            create_vertex_buffer(&device, "cursor_instances", 4 * instance_size);
+
+        // glyphon setup
+        let glyphon_cache = GlyphonCache::new(&device);
+        let mut text_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, surface_format);
+        let text_renderer = TextRenderer::new(&mut text_atlas, &device, Default::default(), None);
+        let mut viewport = Viewport::new(&device, &glyphon_cache);
+        viewport.update(&queue, Resolution { width, height });
 
         Ok(Self {
             device,
@@ -396,19 +301,27 @@ impl Renderer {
             surface,
             surface_config,
             bg_pipeline,
-            glyph_pipeline,
             uniform_buffer,
             uniform_bind_group,
-            atlas_texture,
-            atlas_bind_group,
             font,
-            glyph_cache,
             width,
             height,
             frame_count: 0,
             bg_buf: Vec::new(),
-            glyph_buf: Vec::new(),
             cursor_buf: Vec::new(),
+            bg_gpu_buffer,
+            bg_gpu_capacity: INITIAL_BUFFER_CAPACITY,
+            cursor_gpu_buffer,
+            cursor_gpu_capacity: 4,
+            _glyphon_cache: glyphon_cache,
+            text_atlas,
+            text_renderer,
+            viewport,
+            row_buffers: Vec::new(),
+            span_buf: Vec::new(),
+            row_metas: Vec::new(),
+            prev_total_rows: 0,
+            prev_selection: None,
         })
     }
 
@@ -430,6 +343,10 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[Uniforms { projection }]),
         );
+
+        // Update glyphon viewport
+        self.viewport
+            .update(&self.queue, Resolution { width, height });
     }
 
     /// Get font metrics.
@@ -437,249 +354,316 @@ impl Renderer {
         self.font.metrics
     }
 
+    /// Ensure the background GPU buffer can hold `needed` instances.
+    fn ensure_bg_capacity(&mut self, needed: usize) {
+        if needed > self.bg_gpu_capacity {
+            let new_cap = (self.bg_gpu_capacity * 2).max(needed);
+            self.bg_gpu_buffer = create_vertex_buffer(
+                &self.device,
+                "bg_instances",
+                new_cap * std::mem::size_of::<CellInstance>(),
+            );
+            self.bg_gpu_capacity = new_cap;
+            log::debug!("bg_gpu_buffer grown to {new_cap} instances");
+        }
+    }
+
+    /// Ensure the cursor GPU buffer can hold `needed` instances.
+    fn ensure_cursor_capacity(&mut self, needed: usize) {
+        if needed > self.cursor_gpu_capacity {
+            let new_cap = (self.cursor_gpu_capacity * 2).max(needed);
+            self.cursor_gpu_buffer = create_vertex_buffer(
+                &self.device,
+                "cursor_instances",
+                new_cap * std::mem::size_of::<CellInstance>(),
+            );
+            self.cursor_gpu_capacity = new_cap;
+            log::debug!("cursor_gpu_buffer grown to {new_cap} instances");
+        }
+    }
+
     /// Render a terminal grid snapshot to the screen (full screen).
     pub fn render(&mut self, grid: &GridSnapshot) -> Result<(), wgpu::SurfaceError> {
-        self.render_grids(&[(grid, 0.0, 0.0)], &[])
+        self.render_grids(&[(grid, 0.0, 0.0)], &[], None)
     }
 
     /// Render multiple grid snapshots at different screen positions.
-    ///
-    /// Each entry is (grid, x_offset, y_offset) in pixel coordinates.
-    /// `dividers` is a list of (x, y, length, is_vertical, color) for pane borders.
     pub fn render_grids(
         &mut self,
         grids: &[(&GridSnapshot, f32, f32)],
         dividers: &[(f32, f32, f32, bool, [f32; 4])],
+        preedit: Option<&PreeditOverlay>,
     ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&Default::default());
 
         let metrics = self.font.metrics;
-        let atlas_w = self.glyph_cache.atlas_width as f32;
-        let atlas_h = self.glyph_cache.atlas_height as f32;
 
-        // Cursor blink: visible for 30 frames, hidden for 30 frames (~0.5s each at 60fps)
+        // Cursor blink
         self.frame_count = self.frame_count.wrapping_add(1);
         let cursor_visible = (self.frame_count / 30).is_multiple_of(2);
 
         self.bg_buf.clear();
-        self.glyph_buf.clear();
         self.cursor_buf.clear();
+        self.row_metas.clear();
+
+        // Count total rows across all grids for row buffer allocation
+        // +1 for potential preedit overlay row
+        let total_rows: usize = grids.iter().map(|(g, _, _)| g.rows).sum();
+        let need_rows = total_rows + if preedit.is_some() { 1 } else { 0 };
+
+        // Ensure we have enough row buffers
+        {
+            let mut fs = self.font.font_system_mut();
+            let glyphon_metrics = GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
+            while self.row_buffers.len() < need_rows {
+                self.row_buffers
+                    .push(GlyphonBuffer::new(&mut fs, glyphon_metrics));
+            }
+        }
+
+        // Detect layout or selection changes that invalidate cached row buffers.
+        let layout_changed = total_rows != self.prev_total_rows;
+        let selection_changed = {
+            let current_sel = grids.first().and_then(|(g, _, _)| g.selection);
+            let changed = current_sel != self.prev_selection;
+            self.prev_selection = current_sel;
+            changed
+        };
+        self.prev_total_rows = total_rows;
+
+        // Phase 1: Build backgrounds, cursor, and populate row buffers
+        let mut row_buf_idx = 0;
 
         for &(grid, x_offset, y_offset) in grids {
-            // Add cursor block if visible
+            // Cursor block
             if cursor_visible && grid.cursor.visible {
                 let cx = x_offset + grid.cursor.col as f32 * metrics.cell_width;
                 let cy = y_offset + grid.cursor.row as f32 * metrics.cell_height;
                 self.cursor_buf.push(CellInstance {
                     cell_pos: [cx, cy],
                     cell_size: [metrics.cell_width, metrics.cell_height],
-                    fg_color: [0.0, 0.0, 0.0, 1.0],
-                    bg_color: [0.8, 0.8, 0.8, 1.0], // opaque light gray cursor block
-                    uv_offset: [0.0, 0.0],
-                    uv_size: [0.0, 0.0],
-                    glyph_offset: [0.0, 0.0],
-                    glyph_size: [0.0, 0.0],
-                    glyph_mode: 0.0,
-                    msdf_px_range: 0.0,
+                    bg_color: [0.8, 0.8, 0.8, 1.0],
                 });
             }
 
-            for cell in &grid.cells {
-                // Skip spacer cells (placeholder after wide characters).
-                // The wide char itself covers 2 cell widths, so the spacer
-                // should not render its own background or glyph.
-                if cell.spacer {
-                    continue;
-                }
+            for row in 0..grid.rows {
+                // Determine if this row needs text re-shaping.
+                let row_dirty = layout_changed
+                    || selection_changed
+                    || grid
+                        .dirty_rows
+                        .as_ref()
+                        .is_none_or(|dr| dr.get(row).copied().unwrap_or(true));
 
-                let x = (x_offset + cell.col as f32 * metrics.cell_width).floor();
-                let y = (y_offset + cell.row as f32 * metrics.cell_height).floor();
-                // Pixel-snapped cell size for backgrounds (avoids sub-pixel gaps).
-                let stride = if cell.wide { 2 } else { 1 };
-                let next_x = (x_offset + (cell.col + stride) as f32 * metrics.cell_width).floor();
-                let next_y = (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
-                let bg_w = next_x - x;
-                let bg_h = next_y - y;
-                // Consistent (non-snapped) cell size for glyph positioning.
-                // Using fractional metrics keeps glyphs at uniform offsets
-                // across all columns, preventing wavy text.
-                let glyph_cell_w = metrics.cell_width * stride as f32;
-                let glyph_cell_h = metrics.cell_height;
+                self.span_buf.clear();
+                let mut last_col: usize = 0;
 
-                // Check if this cell is within the selection range
-                let selected = grid.selection.is_some_and(|sel| {
-                    let r = cell.row;
-                    let c = cell.col;
-                    if r < sel.start_row || r > sel.end_row {
-                        false
-                    } else if r == sel.start_row && r == sel.end_row {
-                        c >= sel.start_col && c <= sel.end_col
-                    } else if r == sel.start_row {
-                        c >= sel.start_col
-                    } else if r == sel.end_row {
-                        c <= sel.end_col
-                    } else {
-                        true
+                for col in 0..grid.cols {
+                    let cell = &grid.cells[row * grid.cols + col];
+
+                    if cell.spacer {
+                        continue;
                     }
-                });
 
-                // Swap fg/bg for selected cells
-                let (fg, bg) = if selected {
-                    (cell.bg.to_f32_array(), [0.2, 0.4, 0.8, 1.0])
-                } else {
-                    (cell.fg.to_f32_array(), cell.bg.to_f32_array())
-                };
+                    let x = (x_offset + cell.col as f32 * metrics.cell_width).floor();
+                    let y = (y_offset + cell.row as f32 * metrics.cell_height).floor();
+                    let stride = cell.width as usize;
+                    let next_x =
+                        (x_offset + (cell.col + stride) as f32 * metrics.cell_width).floor();
+                    let next_y = (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
+                    let bg_w = next_x - x;
+                    let bg_h = next_y - y;
 
-                self.bg_buf.push(CellInstance {
-                    cell_pos: [x, y],
-                    cell_size: [bg_w, bg_h],
-                    fg_color: fg,
-                    bg_color: bg,
-                    uv_offset: [0.0, 0.0],
-                    uv_size: [0.0, 0.0],
-                    glyph_offset: [0.0, 0.0],
-                    glyph_size: [0.0, 0.0],
-                    glyph_mode: 0.0,
-                    msdf_px_range: 0.0,
-                });
-
-                if cell.c != ' ' && cell.c != '\0' {
-                    if let Some(glyph) = self.glyph_cache.get_or_insert(cell.c, &self.font) {
-                        if glyph.width > 0 && glyph.height > 0 {
-                            if glyph.is_msdf {
-                                // MSDF glyph: render full cell quad, shader computes distance
-                                let msdf_size = self.font.msdf_cell_size() as f32;
-                                let scale =
-                                    (glyph_cell_w / msdf_size).min(glyph_cell_h / msdf_size);
-                                let px_range = (scale * MSDF_RANGE).max(1.0);
-                                self.glyph_buf.push(CellInstance {
-                                    cell_pos: [x, y],
-                                    cell_size: [bg_w, bg_h],
-                                    fg_color: fg,
-                                    bg_color: bg,
-                                    uv_offset: [
-                                        glyph.atlas_x as f32 / atlas_w,
-                                        glyph.atlas_y as f32 / atlas_h,
-                                    ],
-                                    uv_size: [
-                                        glyph.width as f32 / atlas_w,
-                                        glyph.height as f32 / atlas_h,
-                                    ],
-                                    glyph_offset: [0.0, 0.0],
-                                    glyph_size: [glyph_cell_w, glyph_cell_h],
-                                    glyph_mode: 2.0,
-                                    msdf_px_range: px_range,
-                                });
-                            } else {
-                                // Bitmap glyph: per-pixel positioning
-                                let gw = glyph.width as f32;
-                                let gh = glyph.height as f32;
-
-                                if cell.c as u32 > 127 && self.frame_count < 5 {
-                                    log::info!(
-                                        "GLYPH '{}' u+{:04X}: glyph={}x{} wide={} spacer={} \
-                                         cell_w={:.1} cell_h={:.1} bg={}x{} primary={}",
-                                        cell.c,
-                                        cell.c as u32,
-                                        glyph.width,
-                                        glyph.height,
-                                        cell.wide,
-                                        cell.spacer,
-                                        glyph_cell_w,
-                                        glyph_cell_h,
-                                        bg_w,
-                                        bg_h,
-                                        self.font.font.has_glyph(cell.c),
-                                    );
-                                }
-
-                                let scale = (glyph_cell_w / gw).min(glyph_cell_h / gh).min(1.0);
-                                let gw = gw * scale;
-                                let gh = gh * scale;
-
-                                let from_primary = self.font.font.has_glyph(cell.c);
-                                let (glyph_x, glyph_y) = if from_primary && scale >= 1.0 {
-                                    let gx = glyph.bearing_x.round();
-                                    let glyph_top = glyph.bearing_y + gh;
-                                    let gy = (metrics.baseline - glyph_top).round();
-                                    (gx, gy)
-                                } else {
-                                    let gx = ((glyph_cell_w - gw) / 2.0).round();
-                                    let gy = ((glyph_cell_h - gh) / 2.0).round();
-                                    (gx, gy)
-                                };
-
-                                self.glyph_buf.push(CellInstance {
-                                    cell_pos: [x, y],
-                                    cell_size: [bg_w, bg_h],
-                                    fg_color: fg,
-                                    bg_color: bg,
-                                    uv_offset: [
-                                        glyph.atlas_x as f32 / atlas_w,
-                                        glyph.atlas_y as f32 / atlas_h,
-                                    ],
-                                    uv_size: [
-                                        glyph.width as f32 / atlas_w,
-                                        glyph.height as f32 / atlas_h,
-                                    ],
-                                    glyph_offset: [glyph_x, glyph_y],
-                                    glyph_size: [gw, gh],
-                                    glyph_mode: 1.0,
-                                    msdf_px_range: 0.0,
-                                });
-                            }
+                    let selected = grid.selection.is_some_and(|sel| {
+                        let r = cell.row;
+                        let c = cell.col;
+                        if r < sel.start_row || r > sel.end_row {
+                            false
+                        } else if r == sel.start_row && r == sel.end_row {
+                            c >= sel.start_col && c <= sel.end_col
+                        } else if r == sel.start_row {
+                            c >= sel.start_col
+                        } else if r == sel.end_row {
+                            c <= sel.end_col
+                        } else {
+                            true
                         }
+                    });
+
+                    let (fg_rgba, bg) = if selected {
+                        (cell.bg, [0.2, 0.4, 0.8, 1.0])
+                    } else {
+                        (cell.fg, cell.bg.to_f32_array())
+                    };
+
+                    self.bg_buf.push(CellInstance {
+                        cell_pos: [x, y],
+                        cell_size: [bg_w, bg_h],
+                        bg_color: bg,
+                    });
+
+                    if row_dirty {
+                        // Fill gaps with transparent spaces for skipped spacer columns
+                        while last_col < col {
+                            self.span_buf
+                                .push((" ".to_string(), GlyphonColor::rgba(0, 0, 0, 0)));
+                            last_col += 1;
+                        }
+
+                        let color = GlyphonColor::rgba(fg_rgba.r, fg_rgba.g, fg_rgba.b, fg_rgba.a);
+                        if cell.c == '\0' {
+                            self.span_buf.push((" ".to_string(), color));
+                        } else {
+                            self.span_buf.push((cell.c.to_string(), color));
+                        }
+                        last_col = col + stride;
                     }
                 }
+
+                // Only re-shape text for dirty rows; clean rows reuse previous buffer
+                if row_dirty {
+                    let buf = &mut self.row_buffers[row_buf_idx];
+                    let mut fs = self.font.font_system_mut();
+                    let glyphon_metrics =
+                        GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
+                    buf.set_metrics(&mut fs, glyphon_metrics);
+                    buf.set_size(
+                        &mut fs,
+                        Some(metrics.cell_width * grid.cols as f32),
+                        Some(metrics.cell_height),
+                    );
+
+                    let default_attrs = Attrs::new().family(Family::Monospace);
+                    let spans: Vec<(&str, Attrs)> = self
+                        .span_buf
+                        .iter()
+                        .map(|(s, color)| {
+                            (
+                                s.as_str(),
+                                Attrs::new().family(Family::Monospace).color(*color),
+                            )
+                        })
+                        .collect();
+                    buf.set_rich_text(&mut fs, spans, &default_attrs, Shaping::Advanced, None);
+                    buf.shape_until_scroll(&mut fs, false);
+                }
+
+                self.row_metas.push(RowMeta {
+                    x_offset,
+                    y_offset: y_offset + row as f32 * metrics.cell_height,
+                    grid_cols: grid.cols,
+                });
+                row_buf_idx += 1;
             }
         }
 
-        // Upload atlas if dirty
-        if self.glyph_cache.dirty {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                self.glyph_cache.atlas_data(),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.glyph_cache.atlas_width * 4),
-                    rows_per_image: Some(self.glyph_cache.atlas_height),
-                },
-                wgpu::Extent3d {
-                    width: self.glyph_cache.atlas_width,
-                    height: self.glyph_cache.atlas_height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.glyph_cache.mark_clean();
+        // Preedit overlay: populate extra row buffer + bg/underline quads
+        // Preedit bg/underline are appended to cursor_buf after the cursor block,
+        // so they overdraw the cursor at the composition position (intended).
+        if let Some(pe) = preedit {
+            let display_width = pe.text.width();
+            if display_width == 0 {
+                // Zero-width preedit (e.g., combining-only chars) — skip overlay
+            } else {
+                let pe_w = display_width as f32 * metrics.cell_width;
+                let underline_h = 2.0_f32;
+
+                // Semi-transparent background
+                self.cursor_buf.push(CellInstance {
+                    cell_pos: [pe.x, pe.y],
+                    cell_size: [pe_w, metrics.cell_height],
+                    bg_color: [0.15, 0.15, 0.25, 0.92],
+                });
+                // Underline indicator
+                self.cursor_buf.push(CellInstance {
+                    cell_pos: [pe.x, pe.y + metrics.cell_height - underline_h],
+                    cell_size: [pe_w, underline_h],
+                    bg_color: [0.4, 0.6, 1.0, 1.0],
+                });
+
+                // Populate preedit text in extra row buffer
+                let buf = &mut self.row_buffers[row_buf_idx];
+                {
+                    let mut fs = self.font.font_system_mut();
+                    let glyphon_metrics =
+                        GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
+                    buf.set_metrics(&mut fs, glyphon_metrics);
+                    buf.set_size(&mut fs, Some(pe_w), Some(metrics.cell_height));
+
+                    let default_attrs = Attrs::new().family(Family::Monospace);
+                    let spans = [(
+                        pe.text.as_str(),
+                        Attrs::new()
+                            .family(Family::Monospace)
+                            .color(GlyphonColor::rgba(255, 255, 255, 255)),
+                    )];
+                    buf.set_rich_text(&mut fs, spans, &default_attrs, Shaping::Advanced, None);
+                    buf.shape_until_scroll(&mut fs, false);
+                }
+
+                self.row_metas.push(RowMeta {
+                    x_offset: pe.x,
+                    y_offset: pe.y,
+                    grid_cols: display_width,
+                });
+                row_buf_idx += 1;
+            } // else display_width > 0
         }
 
-        // Create GPU buffers
-        let bg_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("bg_instances"),
-                contents: bytemuck::cast_slice(&self.bg_buf),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        // Phase 2: Create TextAreas from (now immutable) row buffers and prepare glyphon
+        {
+            let text_areas: Vec<TextArea> = self
+                .row_buffers
+                .iter()
+                .zip(self.row_metas.iter())
+                .take(row_buf_idx)
+                .map(|(buf, meta)| TextArea {
+                    buffer: buf,
+                    left: meta.x_offset,
+                    top: meta.y_offset,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: meta.x_offset as i32,
+                        top: meta.y_offset as i32,
+                        right: (meta.x_offset + meta.grid_cols as f32 * metrics.cell_width) as i32,
+                        bottom: (meta.y_offset + metrics.cell_height) as i32 + 1,
+                    },
+                    default_color: GlyphonColor::rgba(204, 204, 204, 255),
+                    custom_glyphs: &[],
+                })
+                .collect();
 
-        let glyph_buffer = if !self.glyph_buf.is_empty() {
-            Some(
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("glyph_instances"),
-                        contents: bytemuck::cast_slice(&self.glyph_buf),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-            )
-        } else {
-            None
-        };
+            let mut fs = self.font.font_system_mut();
+            let mut cache = self.font.swash_cache_mut();
+            self.text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut fs,
+                    &mut self.text_atlas,
+                    &self.viewport,
+                    text_areas,
+                    &mut cache,
+                )
+                .unwrap_or_else(|e| log::warn!("glyphon prepare failed: {e:?}"));
+        }
+
+        // Write instance data to pre-allocated GPU buffers
+        if !self.bg_buf.is_empty() {
+            self.ensure_bg_capacity(self.bg_buf.len());
+            self.queue
+                .write_buffer(&self.bg_gpu_buffer, 0, bytemuck::cast_slice(&self.bg_buf));
+        }
+
+        if !self.cursor_buf.is_empty() {
+            self.ensure_cursor_capacity(self.cursor_buf.len());
+            self.queue.write_buffer(
+                &self.cursor_gpu_buffer,
+                0,
+                bytemuck::cast_slice(&self.cursor_buf),
+            );
+        }
 
         // Encode render pass
         let mut encoder = self
@@ -712,29 +696,19 @@ impl Renderer {
             // Pass 1: backgrounds
             render_pass.set_pipeline(&self.bg_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, bg_buffer.slice(..));
+            render_pass.set_vertex_buffer(0, self.bg_gpu_buffer.slice(..));
             render_pass.draw(0..4, 0..self.bg_buf.len() as u32);
 
-            // Pass 2: glyphs
-            if let Some(ref buf) = glyph_buffer {
-                render_pass.set_pipeline(&self.glyph_pipeline);
-                render_pass.set_vertex_buffer(0, buf.slice(..));
-                render_pass.draw(0..4, 0..self.glyph_buf.len() as u32);
-            }
+            // Pass 2: text (glyphon)
+            self.text_renderer
+                .render(&self.text_atlas, &self.viewport, &mut render_pass)
+                .unwrap_or_else(|e| log::warn!("glyphon render failed: {e:?}"));
 
-            // Pass 3: cursor overlay (uses bg_pipeline with alpha blending via glyph_pipeline)
+            // Pass 3: cursor overlay
             if !self.cursor_buf.is_empty() {
-                let cursor_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("cursor_instances"),
-                            contents: bytemuck::cast_slice(&self.cursor_buf),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-                // Use glyph_pipeline for alpha blending, fs_background just returns bg_color
                 render_pass.set_pipeline(&self.bg_pipeline);
-                render_pass.set_vertex_buffer(0, cursor_buffer.slice(..));
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.cursor_gpu_buffer.slice(..));
                 render_pass.draw(0..4, 0..self.cursor_buf.len() as u32);
             }
 
@@ -752,14 +726,7 @@ impl Renderer {
                         CellInstance {
                             cell_pos: [x, y],
                             cell_size: [w, h],
-                            fg_color: color,
                             bg_color: color,
-                            uv_offset: [0.0, 0.0],
-                            uv_size: [0.0, 0.0],
-                            glyph_offset: [0.0, 0.0],
-                            glyph_size: [0.0, 0.0],
-                            glyph_mode: 0.0,
-                            msdf_px_range: 0.0,
                         }
                     })
                     .collect();
@@ -771,6 +738,7 @@ impl Renderer {
                             usage: wgpu::BufferUsages::VERTEX,
                         });
                 render_pass.set_pipeline(&self.bg_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, divider_buffer.slice(..));
                 render_pass.draw(0..4, 0..divider_instances.len() as u32);
             }
@@ -778,6 +746,8 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        self.text_atlas.trim();
 
         Ok(())
     }
@@ -801,6 +771,16 @@ impl Renderer {
     }
 }
 
+/// Create a pre-allocated GPU vertex buffer with the given byte size.
+fn create_vertex_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 /// Build an orthographic projection matrix (top-left origin, pixel coords).
 fn ortho_projection(width: f32, height: f32) -> [[f32; 4]; 4] {
     [
@@ -818,7 +798,6 @@ mod tests {
     #[test]
     fn test_ortho_projection() {
         let proj = ortho_projection(800.0, 600.0);
-        // Top-left should map to (-1, 1) in clip space
         assert!((proj[0][0] - 2.0 / 800.0).abs() < 0.001);
         assert!((proj[1][1] - (-2.0 / 600.0)).abs() < 0.001);
         assert!((proj[3][0] - (-1.0)).abs() < 0.001);
@@ -827,8 +806,8 @@ mod tests {
 
     #[test]
     fn test_cell_instance_size() {
-        // Ensure CellInstance is properly aligned for GPU
-        assert_eq!(std::mem::size_of::<CellInstance>(), 88);
+        // Simplified: pos(8) + size(8) + bg_color(16) = 32 bytes
+        assert_eq!(std::mem::size_of::<CellInstance>(), 32);
     }
 
     #[test]

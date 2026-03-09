@@ -1046,6 +1046,9 @@ impl AppCallbacks for TermeshCallbacks {
                 }
             }
             Action::Copy | Action::Paste => { /* handled by platform layer */ }
+            Action::SelectAll | Action::NewTab | Action::CloseTab | Action::Quit | Action::Find => {
+                log::info!("action not yet implemented: {action:?}");
+            }
         }
     }
 
@@ -1086,9 +1089,18 @@ impl AppCallbacks for TermeshCallbacks {
                 // Resize the newly selected session (select_index auto-clamped)
                 self.resize_focused_session();
                 // In Split mode, fill empty panes with remaining sessions
+                // and auto-focus a pane that still has a session bound.
                 if self.view_mode == ViewMode::Split {
                     self.rebind_split_panes();
                     self.resize_split_panes();
+                    // If the focused pane lost its session, move focus
+                    // to the first pane that still has one.
+                    if self.layout.layout().focused_pane().session_id.is_none() {
+                        let panes = self.layout.layout().panes().to_vec();
+                        if let Some(target) = panes.iter().find(|p| p.session_id.is_some()) {
+                            self.layout.layout_mut().focus_pane(target.id);
+                        }
+                    }
                     self.show_picker_if_needed();
                 }
             }
@@ -1234,7 +1246,7 @@ impl AppCallbacks for TermeshCallbacks {
                         terminal_rect.y as f32,
                     ));
                 } else if let Some(session_id) = self.focus_layout.sessions().selected_id() {
-                    if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                    if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
                         grids.push((
                             terminal.render_grid(),
                             terminal_rect.x as f32,
@@ -1277,14 +1289,18 @@ impl AppCallbacks for TermeshCallbacks {
 
                     if let Some(session_id) = pane.session_id {
                         // Pane header — use pane position index, not session list index
-                        let label = self
+                        let entry = self
                             .focus_layout
                             .sessions()
                             .entries()
                             .iter()
-                            .find(|e| e.id == session_id)
-                            .map(|e| e.label.as_str())
-                            .unwrap_or("???");
+                            .find(|e| e.id == session_id);
+                        let label = entry.map(|e| e.label.as_str()).unwrap_or("???");
+                        let project_name = entry
+                            .and_then(|e| e.project_id)
+                            .and_then(|pid| self.projects.get(&pid))
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("");
                         let state = self.session_mgr.agent_state(session_id);
                         let agent_kind = self.session_mgr.agent_kind(session_id);
                         let pane_cols = (rect.width as f32 / cell_w).floor() as usize;
@@ -1296,11 +1312,12 @@ impl AppCallbacks for TermeshCallbacks {
                             pane_cols,
                             self.spinner_frame,
                             pane_idx,
+                            project_name,
                         );
                         grids.push((pane_header, pane_x, pane_y));
 
                         // Terminal content (offset by 1 row for header)
-                        if let Some(terminal) = self.session_mgr.terminal(session_id) {
+                        if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
                             let mut grid = terminal.render_grid();
                             // Hide cursor in non-focused panes
                             if !is_focused || self.session_picker.is_some() {
@@ -1456,18 +1473,130 @@ impl AppCallbacks for TermeshCallbacks {
         }
     }
 
-    fn on_mouse_press(&mut self, row: usize, col: usize) {
-        if let Some(session_id) = self.focused_session() {
-            if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
-                terminal.selection_start(row, col);
+    fn on_mouse_press(&mut self, x: f64, y: f64) {
+        use termesh_layout::focus_layout::{HEADER_HEIGHT, STATUS_HEIGHT};
+
+        let (screen_w, screen_h) = self.window_size;
+        let (cell_w, cell_h) = self.cell_size;
+        let header_px = (HEADER_HEIGHT as f32 * cell_h) as u32;
+        let status_px = (STATUS_HEIGHT as f32 * cell_h) as u32;
+        let regions = self
+            .focus_layout
+            .compute_regions_with_bars(screen_w, screen_h, header_px, status_px);
+
+        // Click on session list → select session
+        if self.show_session_list && regions.session_list.contains(x, y) {
+            let rel_y = y - regions.session_list.y as f64;
+            let row = (rel_y / cell_h as f64) as usize;
+            // Session list: row 0 = header "Sessions", rows 1.. = entries
+            if row >= 1 {
+                let entry_idx = row - 1;
+                let entries = self.focus_layout.sessions().entries();
+                if entry_idx < entries.len() {
+                    let sid = entries[entry_idx].id;
+                    self.focus_layout.sessions_mut().select_by_id(sid);
+                    self.focus_layout.set_focus(FocusRegion::SessionList);
+                    self.resize_focused_session();
+                }
+            }
+            return;
+        }
+
+        // Click on terminal region
+        if regions.terminal.contains(x, y) {
+            match self.view_mode {
+                ViewMode::Focus => {
+                    // Convert to terminal-relative grid coords
+                    let rel_x = x - regions.terminal.x as f64;
+                    let rel_y = y - regions.terminal.y as f64;
+                    let col = (rel_x / cell_w as f64) as usize;
+                    let row = (rel_y / cell_h as f64) as usize;
+                    if let Some(session_id) = self.focused_session() {
+                        if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
+                            terminal.selection_start(row, col);
+                        }
+                    }
+                }
+                ViewMode::Split => {
+                    // Hit-test which pane was clicked
+                    let term_rect = regions.terminal;
+                    for pane in self.layout.layout().panes().to_vec() {
+                        if !self.layout.is_pane_visible(pane.id) {
+                            continue;
+                        }
+                        let rect = pane.pixel_rect(term_rect.width, term_rect.height);
+                        let pane_px = termesh_layout::pane::PixelRect {
+                            x: term_rect.x + rect.x,
+                            y: term_rect.y + rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        };
+                        if pane_px.contains(x, y) {
+                            // Focus this pane
+                            self.layout.layout_mut().focus_pane(pane.id);
+                            // Convert to pane-relative grid coords (skip 1-row header)
+                            let rel_x = x - pane_px.x as f64;
+                            let rel_y = y - pane_px.y as f64 - cell_h as f64;
+                            if rel_y >= 0.0 {
+                                let col = (rel_x / cell_w as f64) as usize;
+                                let row = (rel_y / cell_h as f64) as usize;
+                                if let Some(sid) = pane.session_id {
+                                    if let Some(terminal) = self.session_mgr.terminal_mut(sid) {
+                                        terminal.selection_start(row, col);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
 
-    fn on_mouse_drag(&mut self, row: usize, col: usize) {
-        if let Some(session_id) = self.focused_session() {
-            if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
-                terminal.selection_update(row, col);
+    fn on_mouse_drag(&mut self, x: f64, y: f64) {
+        use termesh_layout::focus_layout::{HEADER_HEIGHT, STATUS_HEIGHT};
+
+        let (screen_w, screen_h) = self.window_size;
+        let (cell_w, cell_h) = self.cell_size;
+        let header_px = (HEADER_HEIGHT as f32 * cell_h) as u32;
+        let status_px = (STATUS_HEIGHT as f32 * cell_h) as u32;
+        let regions = self
+            .focus_layout
+            .compute_regions_with_bars(screen_w, screen_h, header_px, status_px);
+
+        match self.view_mode {
+            ViewMode::Focus => {
+                if regions.terminal.contains(x, y) {
+                    let rel_x = x - regions.terminal.x as f64;
+                    let rel_y = y - regions.terminal.y as f64;
+                    let col = (rel_x / cell_w as f64) as usize;
+                    let row = (rel_y / cell_h as f64) as usize;
+                    if let Some(session_id) = self.focused_session() {
+                        if let Some(terminal) = self.session_mgr.terminal_mut(session_id) {
+                            terminal.selection_update(row, col);
+                        }
+                    }
+                }
+            }
+            ViewMode::Split => {
+                // Use the focused pane for drag (already set by on_mouse_press)
+                let term_rect = regions.terminal;
+                let focused = self.layout.layout().focused_pane().clone();
+                if self.layout.is_pane_visible(focused.id) {
+                    let rect = focused.pixel_rect(term_rect.width, term_rect.height);
+                    let pane_px_x = term_rect.x + rect.x;
+                    let pane_px_y = term_rect.y + rect.y;
+                    let rel_x = x - pane_px_x as f64;
+                    let rel_y = y - pane_px_y as f64 - cell_h as f64;
+                    let col = (rel_x.max(0.0) / cell_w as f64) as usize;
+                    let row = (rel_y.max(0.0) / cell_h as f64) as usize;
+                    if let Some(sid) = focused.session_id {
+                        if let Some(terminal) = self.session_mgr.terminal_mut(sid) {
+                            terminal.selection_update(row, col);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1484,7 +1613,11 @@ impl AppCallbacks for TermeshCallbacks {
 
     fn on_paste(&mut self, text: &str) {
         if let Some(session_id) = self.focused_session() {
+            // Wrap in bracketed paste mode so CLI tools (Claude Code, vim, etc.)
+            // can distinguish pasted text from typed input.
+            let _ = self.session_mgr.write_to(session_id, b"\x1b[200~");
             let _ = self.session_mgr.write_to(session_id, text.as_bytes());
+            let _ = self.session_mgr.write_to(session_id, b"\x1b[201~");
         }
     }
 
@@ -1493,6 +1626,50 @@ impl AppCallbacks for TermeshCallbacks {
             return false;
         }
         self.session_mgr.is_empty()
+    }
+
+    fn has_pending_output(&self) -> bool {
+        self.session_mgr.had_output()
+    }
+
+    fn on_preedit(&mut self, _text: &str, _cursor_pos: Option<(usize, usize)>) {
+        // No app-level state needed; event_loop stores preedit text.
+    }
+
+    fn ime_cursor_area(&self) -> Option<(f32, f32, f32, f32)> {
+        use termesh_layout::focus_layout::{HEADER_HEIGHT, STATUS_HEIGHT};
+
+        let (cell_w, cell_h) = self.cell_size;
+        let (screen_w, screen_h) = self.window_size;
+        let header_px = (HEADER_HEIGHT as f32 * cell_h) as u32;
+        let status_px = (STATUS_HEIGHT as f32 * cell_h) as u32;
+
+        let regions = self
+            .focus_layout
+            .compute_regions_with_bars(screen_w, screen_h, header_px, status_px);
+        let tr = regions.terminal;
+
+        match self.view_mode {
+            ViewMode::Focus => {
+                let sid = self.focus_layout.sessions().selected_id()?;
+                let terminal = self.session_mgr.terminal(sid)?;
+                let (row, col) = terminal.cursor_position()?;
+                let cx = tr.x as f32 + col as f32 * cell_w;
+                let cy = tr.y as f32 + row as f32 * cell_h;
+                Some((cx, cy, cell_w, cell_h))
+            }
+            ViewMode::Split => {
+                let pane = self.layout.layout().focused_pane();
+                let sid = pane.session_id?;
+                let terminal = self.session_mgr.terminal(sid)?;
+                let (row, col) = terminal.cursor_position()?;
+                let rect = pane.pixel_rect(tr.width, tr.height);
+                let cx = tr.x as f32 + rect.x as f32 + col as f32 * cell_w;
+                // +cell_h to skip pane header row
+                let cy = tr.y as f32 + rect.y as f32 + cell_h + row as f32 * cell_h;
+                Some((cx, cy, cell_w, cell_h))
+            }
+        }
     }
 }
 

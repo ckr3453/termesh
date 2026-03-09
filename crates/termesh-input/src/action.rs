@@ -61,6 +61,16 @@ pub enum Action {
     CycleFocusRegion,
     /// Open session picker to swap the focused pane's session (Split mode only).
     SwapSession,
+    /// Select all text in the active terminal.
+    SelectAll,
+    /// Open a new tab.
+    NewTab,
+    /// Close the current tab.
+    CloseTab,
+    /// Quit the application.
+    Quit,
+    /// Open the find/search bar.
+    Find,
 }
 
 #[cfg(test)]

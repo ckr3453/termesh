@@ -571,6 +571,7 @@ impl AgentPicker {
                 visible: false,
             },
             selection: None,
+            dirty_rows: None,
         }
     }
 
@@ -781,6 +782,7 @@ impl AgentPicker {
                 visible: false,
             },
             selection: None,
+            dirty_rows: None,
         }
     }
 }

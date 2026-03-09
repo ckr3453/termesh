@@ -88,7 +88,58 @@
 
 ---
 
-## Phase 6: 원격 접속
+## Phase 6: 렌더러 업그레이드 (renderer-upgrade) ✅
+
+**목표**: 네이티브 터미널 수준의 렌더링 성능과 품질 확보
+
+### 렌더 루프 + GPU 최적화 (4 tasks)
+- [x] Dirty-based 렌더 루프 (idle CPU 절감, 500ms 커서 블링크 타이머)
+- [x] GPU 버퍼 재사용 (매 프레임 create_buffer_init 제거, amortized O(1) 성장)
+- [x] wgpu 28 업그레이드 + glyphon/cosmic-text 전환
+- [x] 시스템 단축키 확장 (Cmd+A/T/W/Q/F, 하드코딩 → keymap 일반화)
+
+---
+
+## Phase 7: 렌더링 품질 + 호환성 ✅
+
+**목표**: "이모지 안 깨지고, 한글 잘 나오고, 입력 안 밀리고, 스크롤 안 버벅이는" 수준
+
+### 렌더링 품질 (4 tasks)
+- [x] 이모지 너비 정정 (unicode-width 통합, wide:bool → width:u8, Apple Color Emoji fallback)
+- [x] CJK Fallback 폰트 등록 + 폰트 높이 수정 (cosmic-text monospace family, 메트릭 개선)
+- [x] IME Preedit UI (한글 조합 미리보기, 반투명 배경 + 밑줄, set_ime_cursor_area 동기화)
+- [x] 스크롤 성능 최적화 (dirty rows 행별 추적, glyphon Buffer 재사용, shaping 스킵)
+
+---
+
+## Phase 8: 기본 터미널 완성도
+
+**목표**: iTerm2 대체 가능한 수준의 일상 터미널
+
+### Action 핸들러 구현 (2 tasks)
+- [ ] Quit/CloseTab/NewTab 핸들러 연결 (기존 SessionManager 메서드 연결)
+- [ ] SelectAll/Find 구현 (선택 영역 로직 + 검색 UI 패널)
+
+### 코드 정리 (2 tasks)
+- [ ] 4개 에이전트 동시 수정 통합 검증 (renderer.rs 충돌 확인, cargo build/test)
+- [ ] #[allow(dead_code)] 7곳 정리 + agent_picker 테스트 실패 3건 수정
+
+### 색공간 + 렌더링 고도화 (2 tasks)
+- [ ] sRGB 색공간 정리 (renderer.rs:144 의도 명확화 또는 sRGB 전환)
+- [ ] 서브픽셀 렌더링 + Color emoji COLR 지원 (glyphon 의존)
+
+---
+
+## Phase 9: 사용자 설정 시스템
+
+**목표**: 키바인딩/테마를 사용자가 커스터마이징 가능
+
+- [ ] config/default.toml에서 keymap 로드 (현재 Serialize/Deserialize 준비됨)
+- [ ] 사용자 정의 색상 스킴 / 테마 설정
+
+---
+
+## Phase 10: 원격 접속
 
 **목표**: PC에서 나가도 폰으로 이어서 작업
 

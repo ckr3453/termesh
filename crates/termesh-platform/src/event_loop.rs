@@ -3,13 +3,14 @@
 use crate::input_bridge;
 use crate::window::default_window_attributes;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use termesh_input::action::Action;
 use termesh_input::handler::InputHandler;
 use termesh_renderer::renderer::Renderer;
 use termesh_terminal::terminal::Terminal;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 /// Callback trait for delegating event handling to the application layer.
@@ -50,11 +51,11 @@ pub trait AppCallbacks {
     /// Positive delta = scroll up (view older output), negative = scroll down.
     fn on_scroll(&mut self, delta: i32);
 
-    /// Called when the mouse button is pressed at a grid coordinate.
-    fn on_mouse_press(&mut self, row: usize, col: usize);
+    /// Called when the mouse button is pressed at a pixel coordinate.
+    fn on_mouse_press(&mut self, x: f64, y: f64);
 
-    /// Called when the mouse is dragged to a grid coordinate (selection update).
-    fn on_mouse_drag(&mut self, row: usize, col: usize);
+    /// Called when the mouse is dragged to a pixel coordinate (selection update).
+    fn on_mouse_drag(&mut self, x: f64, y: f64);
 
     /// Called when the mouse button is released.
     fn on_mouse_release(&mut self);
@@ -67,6 +68,22 @@ pub trait AppCallbacks {
 
     /// Returns true if the application should exit (e.g., no sessions left).
     fn should_exit(&self) -> bool;
+
+    /// Returns true if there is pending PTY output that needs rendering.
+    ///
+    /// Used by the event loop to decide whether to schedule a redraw
+    /// even when no user input has occurred.
+    fn has_pending_output(&self) -> bool;
+
+    /// Called when IME preedit text changes.
+    /// Empty text means preedit ended.
+    fn on_preedit(&mut self, _text: &str, _cursor_pos: Option<(usize, usize)>) {}
+
+    /// Returns the pixel position and size of the focused cursor for IME positioning.
+    /// Format: (x, y, width, height) in physical pixels.
+    fn ime_cursor_area(&self) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
 }
 
 /// Configuration for launching the platform event loop.
@@ -92,6 +109,9 @@ impl Default for PlatformConfig {
     }
 }
 
+/// Cursor blink interval for scheduling periodic redraws.
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Application state managed by the winit event loop.
 struct App {
     config: PlatformConfig,
@@ -108,12 +128,18 @@ struct App {
     cursor_position: (f64, f64),
     /// System clipboard.
     clipboard: Option<arboard::Clipboard>,
+    /// Whether the UI needs a redraw due to user input or state change.
+    dirty: bool,
+    /// Current IME preedit text (None when not composing).
+    preedit_text: Option<String>,
 }
 
 impl App {
     fn new(mut config: PlatformConfig) -> Self {
         let callbacks = config.callbacks.take();
-        let clipboard = arboard::Clipboard::new().ok();
+        // Lazy-initialize clipboard on first copy/paste to avoid
+        // triggering macOS TCC permission prompts at app startup.
+        let clipboard = None;
         Self {
             config,
             window: None,
@@ -124,6 +150,8 @@ impl App {
             mouse_pressed: false,
             cursor_position: (0.0, 0.0),
             clipboard,
+            dirty: true,
+            preedit_text: None,
         }
     }
 
@@ -131,15 +159,6 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
-    }
-
-    /// Convert pixel position to grid (row, col) using font metrics.
-    fn pixel_to_grid(&self, x: f64, y: f64) -> Option<(usize, usize)> {
-        let renderer = self.renderer.as_ref()?;
-        let metrics = renderer.font_metrics();
-        let col = (x as f32 / metrics.cell_width) as usize;
-        let row = (y as f32 / metrics.cell_height) as usize;
-        Some((row, col))
     }
 
     /// Dispatch a keybinding action.
@@ -152,12 +171,26 @@ impl App {
                     None
                 };
                 if let Some(text) = text {
+                    if self.clipboard.is_none() {
+                        match arboard::Clipboard::new() {
+                            Ok(cb) => self.clipboard = Some(cb),
+                            Err(e) => log::warn!("failed to init clipboard: {e}"),
+                        }
+                    }
                     if let Some(clipboard) = &mut self.clipboard {
-                        let _ = clipboard.set_text(&text);
+                        if let Err(e) = clipboard.set_text(&text) {
+                            log::warn!("failed to copy to clipboard: {e}");
+                        }
                     }
                 }
             }
             Action::Paste => {
+                if self.clipboard.is_none() {
+                    match arboard::Clipboard::new() {
+                        Ok(cb) => self.clipboard = Some(cb),
+                        Err(e) => log::warn!("failed to init clipboard: {e}"),
+                    }
+                }
                 let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
                 if let Some(text) = text {
                     if let Some(cb) = &mut self.callbacks {
@@ -173,14 +206,26 @@ impl App {
                 }
             }
         }
+        self.dirty = true;
         self.request_redraw();
     }
 }
 
 impl ApplicationHandler for App {
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Request a redraw every frame to pick up PTY output
-        self.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let has_pending = self
+            .callbacks
+            .as_ref()
+            .is_some_and(|cb| cb.has_pending_output());
+
+        if self.dirty || has_pending {
+            self.request_redraw();
+        }
+
+        // Schedule a periodic redraw for cursor blink
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + CURSOR_BLINK_INTERVAL,
+        ));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -279,6 +324,7 @@ impl ApplicationHandler for App {
                         terminal.resize(rows, cols);
                     }
                 }
+                self.dirty = true;
                 self.request_redraw();
             }
 
@@ -291,18 +337,51 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // Pre-compute preedit cursor position for app-managed mode
+                // (standalone mode derives it from the same render_grid call below)
+                let preedit_app_pos: Option<(f32, f32)> =
+                    match (&self.preedit_text, &self.callbacks) {
+                        (Some(text), _) if text.is_empty() => None,
+                        (Some(_), Some(cb)) => cb.ime_cursor_area().map(|(x, y, _, _)| (x, y)),
+                        _ => None,
+                    };
+
                 if let Some(renderer) = &mut self.renderer {
                     let result = if let Some(cb) = &mut self.callbacks {
                         // App-managed rendering: get grids from callbacks
+                        let preedit_overlay = self
+                            .preedit_text
+                            .as_ref()
+                            .filter(|t| !t.is_empty())
+                            .zip(preedit_app_pos)
+                            .map(
+                                |(text, (x, y))| termesh_renderer::renderer::PreeditOverlay {
+                                    text: text.clone(),
+                                    x,
+                                    y,
+                                },
+                            );
                         let grids = cb.on_tick();
                         let dividers = cb.dividers();
                         let refs: Vec<(&termesh_terminal::grid::GridSnapshot, f32, f32)> =
                             grids.iter().map(|(g, x, y)| (g, *x, *y)).collect();
-                        renderer.render_grids(&refs, &dividers)
-                    } else if let Some(terminal) = &self.terminal {
-                        // Standalone mode: render single terminal
+                        renderer.render_grids(&refs, &dividers, preedit_overlay.as_ref())
+                    } else if let Some(terminal) = &mut self.terminal {
+                        // Standalone mode: single render_grid call for both cursor pos and rendering
                         let grid = terminal.render_grid();
-                        renderer.render(&grid)
+                        let preedit_overlay = self
+                            .preedit_text
+                            .as_ref()
+                            .filter(|t| !t.is_empty())
+                            .map(|text| {
+                                let metrics = renderer.font_metrics();
+                                termesh_renderer::renderer::PreeditOverlay {
+                                    text: text.clone(),
+                                    x: grid.cursor.col as f32 * metrics.cell_width,
+                                    y: grid.cursor.row as f32 * metrics.cell_height,
+                                }
+                            });
+                        renderer.render_grids(&[(&grid, 0.0, 0.0)], &[], preedit_overlay.as_ref())
                     } else {
                         Ok(())
                     };
@@ -322,6 +401,7 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                self.dirty = false;
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -342,7 +422,7 @@ impl ApplicationHandler for App {
                 );
 
                 if has_modifier {
-                    // Try logical key first, fall back to physical key
+                    // Try keybinding lookup
                     let key = input_bridge::convert_key(&event.logical_key)
                         .or_else(|| input_bridge::convert_physical_key(&event.physical_key));
                     if let Some(key) = key {
@@ -353,32 +433,58 @@ impl ApplicationHandler for App {
                             return;
                         }
                     }
+
+                    // Cmd/Logo key: if no binding matched, drop it.
+                    // This is standard macOS behavior — Cmd+key is always for
+                    // the app, never forwarded to the PTY.
+                    if modifiers.logo {
+                        return;
+                    }
                 }
 
-                // Try special keys first (Enter, Backspace, arrows, etc.)
-                let special_bytes = match &event.logical_key {
+                // xterm modifier parameter: 1 + (shift?1) + (alt?2) + (ctrl?4)
+                let mod_param: u8 = 1
+                    + if modifiers.shift { 1 } else { 0 }
+                    + if modifiers.alt { 2 } else { 0 }
+                    + if modifiers.ctrl { 4 } else { 0 };
+
+                // Special keys with modifier encoding (xterm convention)
+                let input: Option<Vec<u8>> = match &event.logical_key {
                     winit::keyboard::Key::Named(named) => match named {
-                        winit::keyboard::NamedKey::Enter => Some(b"\r".as_slice()),
-                        winit::keyboard::NamedKey::Backspace => Some(b"\x7f".as_slice()),
-                        winit::keyboard::NamedKey::Tab => Some(b"\t".as_slice()),
-                        winit::keyboard::NamedKey::Escape => Some(b"\x1b".as_slice()),
-                        winit::keyboard::NamedKey::ArrowUp => Some(b"\x1b[A".as_slice()),
-                        winit::keyboard::NamedKey::ArrowDown => Some(b"\x1b[B".as_slice()),
-                        winit::keyboard::NamedKey::ArrowRight => Some(b"\x1b[C".as_slice()),
-                        winit::keyboard::NamedKey::ArrowLeft => Some(b"\x1b[D".as_slice()),
-                        winit::keyboard::NamedKey::Home => Some(b"\x1b[H".as_slice()),
-                        winit::keyboard::NamedKey::End => Some(b"\x1b[F".as_slice()),
-                        winit::keyboard::NamedKey::Delete => Some(b"\x1b[3~".as_slice()),
-                        winit::keyboard::NamedKey::PageUp => Some(b"\x1b[5~".as_slice()),
-                        winit::keyboard::NamedKey::PageDown => Some(b"\x1b[6~".as_slice()),
-                        winit::keyboard::NamedKey::Insert => Some(b"\x1b[2~".as_slice()),
+                        winit::keyboard::NamedKey::Enter => {
+                            if modifiers.alt {
+                                Some(b"\x1b\r".to_vec())
+                            } else {
+                                Some(b"\r".to_vec())
+                            }
+                        }
+                        winit::keyboard::NamedKey::Backspace => Some(b"\x7f".to_vec()),
+                        winit::keyboard::NamedKey::Tab => {
+                            if modifiers.shift {
+                                Some(b"\x1b[Z".to_vec())
+                            } else {
+                                Some(b"\t".to_vec())
+                            }
+                        }
+                        winit::keyboard::NamedKey::Escape => Some(b"\x1b".to_vec()),
+                        winit::keyboard::NamedKey::ArrowUp => Some(csi_key(b'A', mod_param)),
+                        winit::keyboard::NamedKey::ArrowDown => Some(csi_key(b'B', mod_param)),
+                        winit::keyboard::NamedKey::ArrowRight => Some(csi_key(b'C', mod_param)),
+                        winit::keyboard::NamedKey::ArrowLeft => Some(csi_key(b'D', mod_param)),
+                        winit::keyboard::NamedKey::Home => Some(csi_key(b'H', mod_param)),
+                        winit::keyboard::NamedKey::End => Some(csi_key(b'F', mod_param)),
+                        winit::keyboard::NamedKey::Delete => Some(csi_tilde(3, mod_param)),
+                        winit::keyboard::NamedKey::PageUp => Some(csi_tilde(5, mod_param)),
+                        winit::keyboard::NamedKey::PageDown => Some(csi_tilde(6, mod_param)),
+                        winit::keyboard::NamedKey::Insert => Some(csi_tilde(2, mod_param)),
                         _ => None,
                     },
                     _ => None,
                 };
 
-                let input = if let Some(bytes) = special_bytes {
-                    Some(bytes.to_vec())
+                // If special key was handled, send it and stop
+                let input = if input.is_some() {
+                    input
                 } else if modifiers.ctrl {
                     // Ctrl+letter → control character (e.g., Ctrl+C = 0x03)
                     if let winit::keyboard::Key::Character(c) = &event.logical_key {
@@ -391,10 +497,27 @@ impl ApplicationHandler for App {
                             None
                         }
                     } else {
-                        None
+                        // Ctrl+letter: recover letter from physical key
+                        match input_bridge::convert_physical_key(&event.physical_key) {
+                            Some(termesh_input::keymap::Key::Char(c))
+                                if c.is_ascii_alphabetic() =>
+                            {
+                                Some(vec![c as u8 - b'a' + 1])
+                            }
+                            _ => None,
+                        }
+                    }
+                } else if modifiers.alt {
+                    // Alt+letter → ESC prefix + letter (standard terminal meta key)
+                    match input_bridge::convert_physical_key(&event.physical_key) {
+                        Some(termesh_input::keymap::Key::Char(c)) => Some(vec![0x1b, c as u8]),
+                        _ => None,
                     }
                 } else {
-                    event.text.as_ref().map(|text| text.as_bytes().to_vec())
+                    // Regular character: let Ime::Commit handle it.
+                    // Do NOT use event.text here to avoid double input
+                    // (winit fires both KeyboardInput and Ime::Commit when IME is active).
+                    None
                 };
 
                 if let Some(bytes) = input {
@@ -403,6 +526,7 @@ impl ApplicationHandler for App {
                     } else if let Some(terminal) = &mut self.terminal {
                         terminal.feed_bytes(&bytes);
                     }
+                    self.dirty = true;
                     self.request_redraw();
                 }
             }
@@ -411,12 +535,11 @@ impl ApplicationHandler for App {
                 self.cursor_position = (position.x, position.y);
 
                 if self.mouse_pressed {
-                    if let Some((row, col)) = self.pixel_to_grid(position.x, position.y) {
-                        if let Some(cb) = &mut self.callbacks {
-                            cb.on_mouse_drag(row, col);
-                        }
-                        self.request_redraw();
+                    if let Some(cb) = &mut self.callbacks {
+                        cb.on_mouse_drag(position.x, position.y);
                     }
+                    self.dirty = true;
+                    self.request_redraw();
                 }
             }
 
@@ -426,18 +549,19 @@ impl ApplicationHandler for App {
                         ElementState::Pressed => {
                             self.mouse_pressed = true;
                             let (x, y) = self.cursor_position;
-                            if let Some((row, col)) = self.pixel_to_grid(x, y) {
-                                if let Some(cb) = &mut self.callbacks {
-                                    cb.on_mouse_press(row, col);
-                                }
-                                self.request_redraw();
+                            if let Some(cb) = &mut self.callbacks {
+                                cb.on_mouse_press(x, y);
                             }
+                            self.dirty = true;
+                            self.request_redraw();
                         }
                         ElementState::Released => {
                             self.mouse_pressed = false;
                             if let Some(cb) = &mut self.callbacks {
                                 cb.on_mouse_release();
                             }
+                            self.dirty = true;
+                            self.request_redraw();
                         }
                     }
                 }
@@ -462,26 +586,89 @@ impl ApplicationHandler for App {
                             terminal.scroll_down((-lines) as usize);
                         }
                     }
+                    self.dirty = true;
                     self.request_redraw();
                 }
             }
 
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                self.preedit_text = None;
+                if let Some(cb) = &mut self.callbacks {
+                    cb.on_preedit("", None);
+                }
                 let bytes = text.as_bytes().to_vec();
                 if let Some(cb) = &mut self.callbacks {
                     cb.on_input(&bytes);
                 } else if let Some(terminal) = &mut self.terminal {
                     terminal.feed_bytes(&bytes);
                 }
+                self.dirty = true;
                 self.request_redraw();
             }
 
-            WindowEvent::Ime(_) => {
-                // Preedit and other IME events are ignored for now
+            WindowEvent::Ime(winit::event::Ime::Preedit(text, cursor_pos)) => {
+                if text.is_empty() {
+                    self.preedit_text = None;
+                } else {
+                    self.preedit_text = Some(text.clone());
+                }
+                if let Some(cb) = &mut self.callbacks {
+                    cb.on_preedit(&text, cursor_pos);
+                }
+                // Sync OS IME candidate window position
+                let area = if let Some(cb) = &self.callbacks {
+                    cb.ime_cursor_area()
+                } else if let (Some(terminal), Some(renderer)) =
+                    (&mut self.terminal, &self.renderer)
+                {
+                    let metrics = renderer.font_metrics();
+                    let grid = terminal.render_grid();
+                    Some((
+                        grid.cursor.col as f32 * metrics.cell_width,
+                        grid.cursor.row as f32 * metrics.cell_height,
+                        metrics.cell_width,
+                        metrics.cell_height,
+                    ))
+                } else {
+                    None
+                };
+                if let (Some(window), Some((x, y, w, h))) = (&self.window, area) {
+                    use winit::dpi::{PhysicalPosition, PhysicalSize};
+                    window.set_ime_cursor_area(
+                        PhysicalPosition::new(x as f64, y as f64),
+                        PhysicalSize::new(w as f64, h as f64),
+                    );
+                }
+                self.dirty = true;
+                self.request_redraw();
             }
+
+            WindowEvent::Ime(_) => {}
 
             _ => {}
         }
+    }
+}
+
+/// Encode a CSI key sequence with optional xterm modifier.
+///
+/// Plain: `\x1b[{suffix}`, Modified: `\x1b[1;{mod}{suffix}`
+fn csi_key(suffix: u8, mod_param: u8) -> Vec<u8> {
+    if mod_param > 1 {
+        format!("\x1b[1;{}{}", mod_param, suffix as char).into_bytes()
+    } else {
+        vec![0x1b, b'[', suffix]
+    }
+}
+
+/// Encode a CSI tilde key sequence with optional xterm modifier.
+///
+/// Plain: `\x1b[{num}~`, Modified: `\x1b[{num};{mod}~`
+fn csi_tilde(num: u8, mod_param: u8) -> Vec<u8> {
+    if mod_param > 1 {
+        format!("\x1b[{num};{mod_param}~").into_bytes()
+    } else {
+        format!("\x1b[{num}~").into_bytes()
     }
 }
 
