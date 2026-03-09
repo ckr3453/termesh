@@ -860,6 +860,7 @@ pub(crate) fn fill_row(
 /// Render a 1-row pane header for Split mode.
 ///
 /// Format: ` {session_number} {label} {agent_kind}     {icon} {state_name} `
+#[allow(clippy::too_many_arguments)]
 pub fn render_pane_header(
     label: &str,
     agent_kind: &str,
