@@ -1,11 +1,11 @@
 //! Main GPU renderer for the terminal grid.
 
 use crate::font::{load_builtin_font, FontMetrics, LoadedFont};
-use glyphon::{
-    Buffer as GlyphonBuffer, Cache as GlyphonCache, Color as GlyphonColor, Metrics as GlyphonMetrics,
-    Resolution, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
-};
 use glyphon::cosmic_text::{Attrs, Family, Shaping};
+use glyphon::{
+    Buffer as GlyphonBuffer, Cache as GlyphonCache, Color as GlyphonColor,
+    Metrics as GlyphonMetrics, Resolution, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
 use termesh_terminal::grid::GridSnapshot;
 use unicode_width::UnicodeWidthStr;
 use wgpu::util::DeviceExt;
@@ -280,16 +280,18 @@ impl Renderer {
         });
 
         let instance_size = std::mem::size_of::<CellInstance>();
-        let bg_gpu_buffer =
-            create_vertex_buffer(&device, "bg_instances", INITIAL_BUFFER_CAPACITY * instance_size);
+        let bg_gpu_buffer = create_vertex_buffer(
+            &device,
+            "bg_instances",
+            INITIAL_BUFFER_CAPACITY * instance_size,
+        );
         let cursor_gpu_buffer =
             create_vertex_buffer(&device, "cursor_instances", 4 * instance_size);
 
         // glyphon setup
         let glyphon_cache = GlyphonCache::new(&device);
         let mut text_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, surface_format);
-        let text_renderer =
-            TextRenderer::new(&mut text_atlas, &device, Default::default(), None);
+        let text_renderer = TextRenderer::new(&mut text_atlas, &device, Default::default(), None);
         let mut viewport = Viewport::new(&device, &glyphon_cache);
         viewport.update(&queue, Resolution { width, height });
 
@@ -413,8 +415,7 @@ impl Renderer {
         // Ensure we have enough row buffers
         {
             let mut fs = self.font.font_system_mut();
-            let glyphon_metrics =
-                GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
+            let glyphon_metrics = GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
             while self.row_buffers.len() < need_rows {
                 self.row_buffers
                     .push(GlyphonBuffer::new(&mut fs, glyphon_metrics));
@@ -453,7 +454,7 @@ impl Renderer {
                     || grid
                         .dirty_rows
                         .as_ref()
-                        .map_or(true, |dr| dr.get(row).copied().unwrap_or(true));
+                        .is_none_or(|dr| dr.get(row).copied().unwrap_or(true));
 
                 self.span_buf.clear();
                 let mut last_col: usize = 0;
@@ -470,8 +471,7 @@ impl Renderer {
                     let stride = cell.width as usize;
                     let next_x =
                         (x_offset + (cell.col + stride) as f32 * metrics.cell_width).floor();
-                    let next_y =
-                        (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
+                    let next_y = (y_offset + (cell.row + 1) as f32 * metrics.cell_height).floor();
                     let bg_w = next_x - x;
                     let bg_h = next_y - y;
 
@@ -511,8 +511,7 @@ impl Renderer {
                             last_col += 1;
                         }
 
-                        let color =
-                            GlyphonColor::rgba(fg_rgba.r, fg_rgba.g, fg_rgba.b, fg_rgba.a);
+                        let color = GlyphonColor::rgba(fg_rgba.r, fg_rgba.g, fg_rgba.b, fg_rgba.a);
                         if cell.c == '\0' {
                             self.span_buf.push((" ".to_string(), color));
                         } else {
@@ -546,13 +545,7 @@ impl Renderer {
                             )
                         })
                         .collect();
-                    buf.set_rich_text(
-                        &mut fs,
-                        spans,
-                        &default_attrs,
-                        Shaping::Advanced,
-                        None,
-                    );
+                    buf.set_rich_text(&mut fs, spans, &default_attrs, Shaping::Advanced, None);
                     buf.shape_until_scroll(&mut fs, false);
                 }
 
@@ -573,54 +566,48 @@ impl Renderer {
             if display_width == 0 {
                 // Zero-width preedit (e.g., combining-only chars) — skip overlay
             } else {
-            let pe_w = display_width as f32 * metrics.cell_width;
-            let underline_h = 2.0_f32;
+                let pe_w = display_width as f32 * metrics.cell_width;
+                let underline_h = 2.0_f32;
 
-            // Semi-transparent background
-            self.cursor_buf.push(CellInstance {
-                cell_pos: [pe.x, pe.y],
-                cell_size: [pe_w, metrics.cell_height],
-                bg_color: [0.15, 0.15, 0.25, 0.92],
-            });
-            // Underline indicator
-            self.cursor_buf.push(CellInstance {
-                cell_pos: [pe.x, pe.y + metrics.cell_height - underline_h],
-                cell_size: [pe_w, underline_h],
-                bg_color: [0.4, 0.6, 1.0, 1.0],
-            });
+                // Semi-transparent background
+                self.cursor_buf.push(CellInstance {
+                    cell_pos: [pe.x, pe.y],
+                    cell_size: [pe_w, metrics.cell_height],
+                    bg_color: [0.15, 0.15, 0.25, 0.92],
+                });
+                // Underline indicator
+                self.cursor_buf.push(CellInstance {
+                    cell_pos: [pe.x, pe.y + metrics.cell_height - underline_h],
+                    cell_size: [pe_w, underline_h],
+                    bg_color: [0.4, 0.6, 1.0, 1.0],
+                });
 
-            // Populate preedit text in extra row buffer
-            let buf = &mut self.row_buffers[row_buf_idx];
-            {
-                let mut fs = self.font.font_system_mut();
-                let glyphon_metrics =
-                    GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
-                buf.set_metrics(&mut fs, glyphon_metrics);
-                buf.set_size(&mut fs, Some(pe_w), Some(metrics.cell_height));
+                // Populate preedit text in extra row buffer
+                let buf = &mut self.row_buffers[row_buf_idx];
+                {
+                    let mut fs = self.font.font_system_mut();
+                    let glyphon_metrics =
+                        GlyphonMetrics::new(metrics.font_size, metrics.cell_height);
+                    buf.set_metrics(&mut fs, glyphon_metrics);
+                    buf.set_size(&mut fs, Some(pe_w), Some(metrics.cell_height));
 
-                let default_attrs = Attrs::new().family(Family::Monospace);
-                let spans = [(
-                    pe.text.as_str(),
-                    Attrs::new()
-                        .family(Family::Monospace)
-                        .color(GlyphonColor::rgba(255, 255, 255, 255)),
-                )];
-                buf.set_rich_text(
-                    &mut fs,
-                    spans,
-                    &default_attrs,
-                    Shaping::Advanced,
-                    None,
-                );
-                buf.shape_until_scroll(&mut fs, false);
-            }
+                    let default_attrs = Attrs::new().family(Family::Monospace);
+                    let spans = [(
+                        pe.text.as_str(),
+                        Attrs::new()
+                            .family(Family::Monospace)
+                            .color(GlyphonColor::rgba(255, 255, 255, 255)),
+                    )];
+                    buf.set_rich_text(&mut fs, spans, &default_attrs, Shaping::Advanced, None);
+                    buf.shape_until_scroll(&mut fs, false);
+                }
 
-            self.row_metas.push(RowMeta {
-                x_offset: pe.x,
-                y_offset: pe.y,
-                grid_cols: display_width,
-            });
-            row_buf_idx += 1;
+                self.row_metas.push(RowMeta {
+                    x_offset: pe.x,
+                    y_offset: pe.y,
+                    grid_cols: display_width,
+                });
+                row_buf_idx += 1;
             } // else display_width > 0
         }
 
@@ -639,8 +626,7 @@ impl Renderer {
                     bounds: TextBounds {
                         left: meta.x_offset as i32,
                         top: meta.y_offset as i32,
-                        right: (meta.x_offset + meta.grid_cols as f32 * metrics.cell_width)
-                            as i32,
+                        right: (meta.x_offset + meta.grid_cols as f32 * metrics.cell_width) as i32,
                         bottom: (meta.y_offset + metrics.cell_height) as i32 + 1,
                     },
                     default_color: GlyphonColor::rgba(204, 204, 204, 255),
@@ -666,11 +652,8 @@ impl Renderer {
         // Write instance data to pre-allocated GPU buffers
         if !self.bg_buf.is_empty() {
             self.ensure_bg_capacity(self.bg_buf.len());
-            self.queue.write_buffer(
-                &self.bg_gpu_buffer,
-                0,
-                bytemuck::cast_slice(&self.bg_buf),
-            );
+            self.queue
+                .write_buffer(&self.bg_gpu_buffer, 0, bytemuck::cast_slice(&self.bg_buf));
         }
 
         if !self.cursor_buf.is_empty() {

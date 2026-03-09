@@ -1541,9 +1541,7 @@ impl AppCallbacks for TermeshCallbacks {
                                 let col = (rel_x / cell_w as f64) as usize;
                                 let row = (rel_y / cell_h as f64) as usize;
                                 if let Some(sid) = pane.session_id {
-                                    if let Some(terminal) =
-                                        self.session_mgr.terminal_mut(sid)
-                                    {
+                                    if let Some(terminal) = self.session_mgr.terminal_mut(sid) {
                                         terminal.selection_start(row, col);
                                     }
                                 }
@@ -1617,13 +1615,9 @@ impl AppCallbacks for TermeshCallbacks {
         if let Some(session_id) = self.focused_session() {
             // Wrap in bracketed paste mode so CLI tools (Claude Code, vim, etc.)
             // can distinguish pasted text from typed input.
-            let _ = self
-                .session_mgr
-                .write_to(session_id, b"\x1b[200~");
+            let _ = self.session_mgr.write_to(session_id, b"\x1b[200~");
             let _ = self.session_mgr.write_to(session_id, text.as_bytes());
-            let _ = self
-                .session_mgr
-                .write_to(session_id, b"\x1b[201~");
+            let _ = self.session_mgr.write_to(session_id, b"\x1b[201~");
         }
     }
 

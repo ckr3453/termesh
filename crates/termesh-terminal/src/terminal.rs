@@ -190,9 +190,19 @@ impl Terminal {
 
                 // Hash visual content for dirty detection
                 cell.c.hash(&mut hasher);
-                (renderable.fg.r, renderable.fg.g, renderable.fg.b, renderable.fg.a)
+                (
+                    renderable.fg.r,
+                    renderable.fg.g,
+                    renderable.fg.b,
+                    renderable.fg.a,
+                )
                     .hash(&mut hasher);
-                (renderable.bg.r, renderable.bg.g, renderable.bg.b, renderable.bg.a)
+                (
+                    renderable.bg.r,
+                    renderable.bg.g,
+                    renderable.bg.b,
+                    renderable.bg.a,
+                )
                     .hash(&mut hasher);
                 cell.flags.bits().hash(&mut hasher);
 
@@ -200,9 +210,8 @@ impl Terminal {
             }
 
             let hash = hasher.finish();
-            let is_dirty = offset_changed
-                || dims_changed
-                || self.prev_row_hashes.get(row_idx) != Some(&hash);
+            let is_dirty =
+                offset_changed || dims_changed || self.prev_row_hashes.get(row_idx) != Some(&hash);
             dirty_rows.push(is_dirty);
             row_hashes.push(hash);
         }
@@ -657,7 +666,10 @@ mod tests {
         let mut term = Terminal::new(4, 10, 100);
         let grid = term.render_grid();
         let dirty = grid.dirty_rows.unwrap();
-        assert!(dirty.iter().all(|&d| d), "first render should mark all rows dirty");
+        assert!(
+            dirty.iter().all(|&d| d),
+            "first render should mark all rows dirty"
+        );
     }
 
     #[test]
@@ -667,7 +679,10 @@ mod tests {
         let _ = term.render_grid(); // first call: all dirty
         let grid = term.render_grid(); // second call: no changes
         let dirty = grid.dirty_rows.unwrap();
-        assert!(dirty.iter().all(|&d| !d), "unchanged grid should have no dirty rows");
+        assert!(
+            dirty.iter().all(|&d| !d),
+            "unchanged grid should have no dirty rows"
+        );
     }
 
     #[test]
@@ -695,6 +710,9 @@ mod tests {
         term.scroll_up(2);
         let grid = term.render_grid();
         let dirty = grid.dirty_rows.unwrap();
-        assert!(dirty.iter().all(|&d| d), "scrolling should mark all rows dirty");
+        assert!(
+            dirty.iter().all(|&d| d),
+            "scrolling should mark all rows dirty"
+        );
     }
 }

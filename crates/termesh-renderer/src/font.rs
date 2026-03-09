@@ -44,14 +44,10 @@ impl LoadedFont {
     /// are automatically resolved by cosmic-text's `PlatformFallback`.
     fn new(font_size: f32) -> Result<Self, RenderError> {
         let mut font_system = FontSystem::new();
-        font_system
-            .db_mut()
-            .load_font_data(BUILTIN_FONT.to_vec());
+        font_system.db_mut().load_font_data(BUILTIN_FONT.to_vec());
         // Override default monospace family ("Noto Sans Mono") with our built-in font,
         // which may not exist on all platforms.
-        font_system
-            .db_mut()
-            .set_monospace_family("Cascadia Mono");
+        font_system.db_mut().set_monospace_family("Cascadia Mono");
 
         // Register platform emoji fallback font for color emoji rendering.
         register_emoji_fallback(&mut font_system);
@@ -94,19 +90,13 @@ fn compute_metrics(font_system: &mut FontSystem, font_size: f32) -> FontMetrics 
     );
     let attrs = Attrs::new().family(Family::Monospace);
     // Measure advance widths from multiple representative glyphs.
-    buffer.set_text(
-        font_system,
-        "M@W0",
-        &attrs,
-        Shaping::Advanced,
-        None,
-    );
+    buffer.set_text(font_system, "M@W0", &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
 
     let mut cell_width = font_size * 0.6;
     let mut font_info = None;
 
-    for run in buffer.layout_runs() {
+    if let Some(run) = buffer.layout_runs().next() {
         let mut width_sum = 0.0_f32;
         let mut count = 0u32;
         for glyph in run.glyphs.iter() {
@@ -119,7 +109,6 @@ fn compute_metrics(font_system: &mut FontSystem, font_size: f32) -> FontMetrics 
         if count > 0 {
             cell_width = width_sum / count as f32;
         }
-        break;
     }
 
     // Derive cell_height and baseline from actual font metrics (ascent/descent/leading).

@@ -342,9 +342,7 @@ impl ApplicationHandler for App {
                 let preedit_app_pos: Option<(f32, f32)> =
                     match (&self.preedit_text, &self.callbacks) {
                         (Some(text), _) if text.is_empty() => None,
-                        (Some(_), Some(cb)) => {
-                            cb.ime_cursor_area().map(|(x, y, _, _)| (x, y))
-                        }
+                        (Some(_), Some(cb)) => cb.ime_cursor_area().map(|(x, y, _, _)| (x, y)),
                         _ => None,
                     };
 
@@ -356,11 +354,13 @@ impl ApplicationHandler for App {
                             .as_ref()
                             .filter(|t| !t.is_empty())
                             .zip(preedit_app_pos)
-                            .map(|(text, (x, y))| termesh_renderer::renderer::PreeditOverlay {
-                                text: text.clone(),
-                                x,
-                                y,
-                            });
+                            .map(
+                                |(text, (x, y))| termesh_renderer::renderer::PreeditOverlay {
+                                    text: text.clone(),
+                                    x,
+                                    y,
+                                },
+                            );
                         let grids = cb.on_tick();
                         let dividers = cb.dividers();
                         let refs: Vec<(&termesh_terminal::grid::GridSnapshot, f32, f32)> =
@@ -381,11 +381,7 @@ impl ApplicationHandler for App {
                                     y: grid.cursor.row as f32 * metrics.cell_height,
                                 }
                             });
-                        renderer.render_grids(
-                            &[(&grid, 0.0, 0.0)],
-                            &[],
-                            preedit_overlay.as_ref(),
-                        )
+                        renderer.render_grids(&[(&grid, 0.0, 0.0)], &[], preedit_overlay.as_ref())
                     } else {
                         Ok(())
                     };
@@ -514,9 +510,7 @@ impl ApplicationHandler for App {
                 } else if modifiers.alt {
                     // Alt+letter → ESC prefix + letter (standard terminal meta key)
                     match input_bridge::convert_physical_key(&event.physical_key) {
-                        Some(termesh_input::keymap::Key::Char(c)) => {
-                            Some(vec![0x1b, c as u8])
-                        }
+                        Some(termesh_input::keymap::Key::Char(c)) => Some(vec![0x1b, c as u8]),
                         _ => None,
                     }
                 } else {
